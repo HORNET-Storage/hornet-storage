@@ -149,11 +149,11 @@ type WalletBalance struct {
 }
 
 type WalletTransactions struct {
-	ID      uint      `gorm:"primaryKey"`
-	Address string    `gorm:"not null"`
-	Date    time.Time `gorm:"not null"` // Date and time formatted like "2024-05-23 19:17:22"
-	Output  string    `gorm:"not null"` // Output as a string
-	Value   string    `gorm:"not null"` // Value as a float
+	ID          uint      `gorm:"primaryKey"`
+	WitnessTxId string    `gorm:"not null"`
+	Date        time.Time `gorm:"not null"` // Date and time formatted like "2024-05-23 19:17:22"
+	Output      string    `gorm:"not null"` // Output as a string
+	Value       string    `gorm:"not null"` // Value as a float
 }
 
 type WalletAddress struct {

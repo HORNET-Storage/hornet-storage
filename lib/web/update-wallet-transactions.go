@@ -30,7 +30,7 @@ func handleTransactions(c *fiber.Ctx) error {
 	}
 
 	for _, transaction := range transactions {
-		address, ok := transaction["address"].(string)
+		wtxid, ok := transaction["WTxId"].(string)
 		if !ok {
 			log.Printf("Invalid address format: %v", transaction["address"])
 			continue
@@ -61,7 +61,7 @@ func handleTransactions(c *fiber.Ctx) error {
 		}
 
 		var existingTransaction types.WalletTransactions
-		result := db.Where("address = ? AND date = ? AND output = ? AND value = ?", address, date, output, value).First(&existingTransaction)
+		result := db.Where("witness_tx_id = ? AND date = ? AND output = ? AND value = ?", wtxid, date, output, value).First(&existingTransaction)
 
 		if result.Error == nil {
 			// Transaction already exists, skip it
@@ -76,10 +76,10 @@ func handleTransactions(c *fiber.Ctx) error {
 
 		// Create a new transaction
 		newTransaction := types.WalletTransactions{
-			Address: address,
-			Date:    date,
-			Output:  output,
-			Value:   value,
+			WitnessTxId: wtxid,
+			Date:        date,
+			Output:      output,
+			Value:       value,
 		}
 		if err := db.Create(&newTransaction).Error; err != nil {
 			log.Printf("Error saving new transaction: %v", err)
