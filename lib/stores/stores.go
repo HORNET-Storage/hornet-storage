@@ -9,7 +9,7 @@ import (
 )
 
 type Store interface {
-	InitStore(args ...interface{}) error
+	InitStore(basepath string, args ...interface{}) error
 
 	// Hornet Storage
 	StoreLeaf(root string, leafData *types.DagLeafData) error

@@ -29,8 +29,8 @@ type GravitonStore struct {
 	CacheConfig map[string]string
 }
 
-func (store *GravitonStore) InitStore(args ...interface{}) error {
-	db, err := graviton.NewDiskStore("gravitondb")
+func (store *GravitonStore) InitStore(basepath string, args ...interface{}) error {
+	db, err := graviton.NewDiskStore(basepath)
 	if err != nil {
 		return err
 	}
@@ -447,7 +447,7 @@ func (store *GravitonStore) StoreDag(dag *types.DagData) error {
 }
 
 func (store *GravitonStore) QueryEvents(filter nostr.Filter) ([]*nostr.Event, error) {
-	log.Println("Processing filter:", filter)
+	//log.Println("Processing filter:", filter)
 	var events []*nostr.Event
 
 	snapshot, err := store.Database.LoadSnapshot(0)
@@ -494,8 +494,12 @@ func (store *GravitonStore) QueryEvents(filter nostr.Filter) ([]*nostr.Event, er
 	}
 
 	// Sort the events based on creation time, most recent first
-	sort.Slice(events, func(i, j int) bool {
-		return events[i].CreatedAt > events[j].CreatedAt
+	sort.SliceStable(events, func(i, j int) bool {
+		if events[i].CreatedAt != events[j].CreatedAt {
+			return events[i].CreatedAt > events[j].CreatedAt
+		} else {
+			return events[i].ID > events[j].ID
+		}
 	})
 
 	// Step 3: Apply the limit, if specified
@@ -1024,3 +1028,76 @@ func GetBucket(leaf *merkle_dag.DagLeaf) string {
 		}
 	}
 }
+
+//type RootInfo struct {
+//	Hash      string
+//	Timestamp uint64
+//}
+//
+//func (store *GravitonStore) GetRoots(rootHashes []string) ([]RootInfo, error) {
+//	roots := []RootInfo{}
+//
+//	snapshot, err := store.Database.LoadSnapshot(0)
+//	if err != nil {
+//		return nil, fmt.Errorf("failed to load snapshot: %v", err)
+//	}
+//
+//	indexTree, err := snapshot.GetTree("mbl")
+//	if err != nil {
+//		return nil, fmt.Errorf("failed to get index tree: %v", err)
+//	}
+//
+//	cursor := indexTree.Cursor()
+//	for k, v, err := cursor.First(); err == nil; k, v, err = cursor.Next() {
+//		if slices.Contains(rootHashes, string(k)) || len(rootHashes) == 0 {
+//			// TODO: WE NEED TO HAVE A TIMESTAMP HERE
+//			var timestamp uint64
+//			if err := cbor.Unmarshal(v, &timestamp); err != nil {
+//				return nil, fmt.Errorf("failed to unmarshal timestamp for root %s: %v", k, err)
+//			}
+//
+//			roots = append(roots, RootInfo{
+//				Hash:      string(k),
+//				Timestamp: timestamp,
+//			})
+//		}
+//
+//	}
+//
+//	return roots, nil
+//}
+//
+//// PutRoots stores multiple root hashes with their timestamps
+//func (store *GravitonStore) PutRoots(roots []RootInfo) error {
+//	snapshot, err := store.Database.LoadSnapshot(0)
+//	if err != nil {
+//		return fmt.Errorf("failed to load snapshot: %v", err)
+//	}
+//
+//	indexTree, err := snapshot.GetTree("mbl")
+//	if err != nil {
+//		return fmt.Errorf("failed to get index tree: %v", err)
+//	}
+//
+//	for _, root := range roots {
+//		// Serialize the RootInfo
+//		rootInfoBytes, err := cbor.Marshal(root)
+//		if err != nil {
+//			return fmt.Errorf("failed to marshal root info for %s: %v", root.Hash, err)
+//		}
+//
+//		// Store the serialized RootInfo in the index tree
+//		err = indexTree.Put([]byte(root.Hash), rootInfoBytes)
+//		if err != nil {
+//			return fmt.Errorf("failed to store root info for %s: %v", root.Hash, err)
+//		}
+//	}
+//
+//	// Commit the changes
+//	_, err = graviton.Commit(indexTree)
+//	if err != nil {
+//		return fmt.Errorf("failed to commit changes: %v", err)
+//	}
+//
+//	return nil
+//}

@@ -24,3 +24,6 @@ gravitondb
 hornet-storage
 
 config.json
+
+**/.DS_Store
+

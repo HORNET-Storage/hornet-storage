@@ -3,6 +3,7 @@ package libp2p
 import (
 	"context"
 	"fmt"
+	"github.com/spf13/viper"
 	"log"
 
 	"github.com/libp2p/go-libp2p"
@@ -37,6 +38,9 @@ func GetHost(priv string) host.Host {
 			log.Fatal("Unable to serialize public key. Exiting.")
 		}
 
+		// TODO: should this not go here?
+		viper.Set("relay_pub_key", serializedPub)
+		viper.Set("relay_priv_key", serializedPriv)
 		log.Println("Generated public/private key pair: ", *serializedPub, "/", *serializedPriv)
 		log.Println("Please copy the private key into your config.json file if you want to re-use it")
 

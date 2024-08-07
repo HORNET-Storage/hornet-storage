@@ -9,6 +9,8 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -33,11 +35,11 @@ import (
 	"github.com/HORNET-Storage/hornet-storage/lib/handlers/nostr/kind9735"
 	"github.com/HORNET-Storage/hornet-storage/lib/handlers/nostr/universal"
 	"github.com/HORNET-Storage/hornet-storage/lib/signing"
+	sync "github.com/HORNET-Storage/hornet-storage/lib/sync"
 	"github.com/HORNET-Storage/hornet-storage/lib/transports/libp2p"
 
 	handlers "github.com/HORNET-Storage/hornet-storage/lib/handlers/nostr"
 	stores_graviton "github.com/HORNET-Storage/hornet-storage/lib/stores/graviton"
-
 	net "github.com/libp2p/go-libp2p/core/network"
 	peer "github.com/libp2p/go-libp2p/core/peer"
 	// 	negentropy "github.com/illuzen/go-negentropy"
@@ -120,9 +122,37 @@ func selectRandomItems(arr []int, n int) []int {
 	return selected
 }
 
-func setupStore() *stores_graviton.GravitonStore {
+func deleteFileIfExists(filename string) error {
+	// Check if the file exists
+	_, err := os.Stat(filename)
+	if err == nil {
+		// File exists, attempt to delete it
+		err := os.RemoveAll(filename)
+		if err != nil {
+			return fmt.Errorf("failed to delete file: %w", err)
+		}
+		fmt.Printf("File %s has been deleted\n", filename)
+	} else if os.IsNotExist(err) {
+		// File doesn't exist, no action needed
+		fmt.Printf("File %s does not exist\n", filename)
+		return nil
+	} else {
+		// Some other error occurred
+		return fmt.Errorf("error checking file: %w", err)
+	}
+	return nil
+}
+
+func setupStore(basepath string) *stores_graviton.GravitonStore {
 	store := &stores_graviton.GravitonStore{}
-	store.InitStore()
+	err := deleteFileIfExists(basepath)
+	if err != nil {
+		return nil
+	}
+	err = store.InitStore(basepath)
+	if err != nil {
+		return nil
+	}
 
 	handlers.RegisterHandler("universal", universal.BuildUniversalHandler(store))
 	handlers.RegisterHandler("kind/0", kind0.BuildKind0Handler(store))
@@ -145,14 +175,34 @@ func setupStore() *stores_graviton.GravitonStore {
 	return store
 }
 
-func GenerateRandomEvents(numEvents int, store *stores_graviton.GravitonStore) error {
+func EventsEqual(a, b *nostr.Event) bool {
+	if a == b {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+
+	// Compare all fields
+	return a.ID == b.ID &&
+		a.PubKey == b.PubKey &&
+		a.CreatedAt == b.CreatedAt &&
+		a.Kind == b.Kind &&
+		a.Content == b.Content &&
+		a.Sig == b.Sig &&
+		reflect.DeepEqual(a.Tags, b.Tags)
+}
+
+func GenerateRandomEvents(numEvents int, stores []*stores_graviton.GravitonStore) error {
 	log.Printf("Generating %d random events and storing in graviton\n", numEvents)
 	for i := 0; i < numEvents; i++ {
 		event := GenerateRandomEvent()
 
-		err := store.StoreEvent(event)
-		if err != nil {
-			return err
+		for _, store := range stores {
+			err := store.StoreEvent(event)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -171,10 +221,10 @@ func getRandomKind() int {
 
 func TestEventGenerationStorageRetrieval(t *testing.T) {
 	log.Println("Testing event storage and retrieval.")
-	store := setupStore()
+	store := setupStore("test")
 	numEvents := 1000
 
-	err := GenerateRandomEvents(numEvents, store)
+	err := GenerateRandomEvents(numEvents, []*stores_graviton.GravitonStore{store})
 	if err != nil {
 		t.Fatalf("Error generating events: %v", err)
 	}
@@ -196,30 +246,29 @@ func TestEventGenerationStorageRetrieval(t *testing.T) {
 }
 
 func TestHostConnections(t *testing.T) {
-	log.Println("Testing host connections.")
+	log.Println("Testing p2pHost connections.")
 	//store := setupStore()
 	numHosts := 10
 
 	hosts := []host.Host{}
 
 	for i := 0; i < numHosts; i++ {
-		host := libp2p.GetHost("")
-		defer host.Close()
-		if err := libp2p.SetupMDNS(host, DiscoveryServiceTag); err != nil {
+		p2pHost := libp2p.GetHost("")
+		if err := libp2p.SetupMDNS(p2pHost, DiscoveryServiceTag); err != nil {
 			log.Fatal(err)
 		}
-		fmt.Printf("Host %s addresses:\n", host.ID())
-		for _, addr := range host.Addrs() {
-			fmt.Printf("%s/p2p/%s\n", addr, host.ID())
+		fmt.Printf("Host %s addresses:\n", p2pHost.ID())
+		for _, addr := range p2pHost.Addrs() {
+			fmt.Printf("%s/p2p/%s\n", addr, p2pHost.ID())
 		}
-		hosts = append(hosts, host)
+		hosts = append(hosts, p2pHost)
 	}
 
 	time.Sleep(2 * time.Second)
 
-	for _, host := range hosts {
-		if len(host.Network().Peers()) != numHosts-1 {
-			t.Fatalf("Host %s has %d peers, expected %d", host.ID(), host.Peerstore().Peers().Len(), numHosts-1)
+	for _, p2pHost := range hosts {
+		if len(p2pHost.Network().Peers()) != numHosts-1 {
+			t.Fatalf("Host %s has %d peers, expected %d", p2pHost.ID(), p2pHost.Peerstore().Peers().Len(), numHosts-1)
 		}
 	}
 }
@@ -228,8 +277,9 @@ func TestHostCommunication(t *testing.T) {
 	log.Println("Testing host syncing.")
 	ctx := context.Background()
 
-	store1 := setupStore()
-	err := GenerateRandomEvents(100, store1)
+	store1 := setupStore("test")
+	numEvents := 100
+	err := GenerateRandomEvents(numEvents, []*stores_graviton.GravitonStore{store1})
 	if err != nil {
 		t.Fatalf("Error generating events: %v", err)
 	}
@@ -264,7 +314,7 @@ func TestHostCommunication(t *testing.T) {
 		}
 
 		if bytes.Equal(incoming, outgoing) {
-			fmt.Println("Data matches")
+			log.Println("Data matches")
 		} else {
 			fmt.Printf("Received: %d bytes\n", len(incoming))
 			fmt.Printf("Sent: %d bytes\n", len(outgoing))
@@ -289,5 +339,84 @@ func TestHostCommunication(t *testing.T) {
 	//     fmt.Printf("Sent: %s\n", data)
 
 	time.Sleep(2 * time.Second)
+
+}
+
+func TestNegentropyEventSync(t *testing.T) {
+	log.Println("Testing host syncing.")
+	ctx := context.Background()
+
+	store1 := setupStore("store1")
+	store2 := setupStore("store2")
+	numEvents := 1000
+	// give some events to both, so total events at end should be 3 * numEvents each
+	err := GenerateRandomEvents(numEvents, []*stores_graviton.GravitonStore{store1, store2})
+	if err != nil {
+		t.Fatalf("Error generating events: %v", err)
+	}
+	err = GenerateRandomEvents(numEvents, []*stores_graviton.GravitonStore{store1})
+	if err != nil {
+		t.Fatalf("Error generating events: %v", err)
+	}
+	err = GenerateRandomEvents(numEvents, []*stores_graviton.GravitonStore{store2})
+	if err != nil {
+		t.Fatalf("Error generating events: %v", err)
+	}
+	//e := GenerateRandomEvent()
+	//store1.StoreEvent(e)
+	//store2.StoreEvent(e)
+	if err != nil {
+		t.Fatalf("Error generating events: %v", err)
+	}
+
+	// 	store2 := setupStore()
+	host1 := libp2p.GetHost("")
+	host2 := libp2p.GetHost("")
+
+	if err := libp2p.SetupMDNS(host1, DiscoveryServiceTag); err != nil {
+		t.Fatal(err)
+	}
+	if err := libp2p.SetupMDNS(host2, DiscoveryServiceTag); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := host1.Connect(ctx, peer.AddrInfo{ID: host2.ID(), Addrs: host2.Addrs()}); err != nil {
+		t.Fatal(err)
+	}
+
+	sync.SetupNegentropyEventHandler(host1, "host1", store1)
+	sync.SetupNegentropyEventHandler(host2, "host2", store2)
+
+	// Open a stream to the peer
+	stream, err := host1.NewStream(ctx, host2.ID(), sync.NegentropyProtocol)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = sync.InitiateEventSync(stream, nostr.Filter{}, "host1", store1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = stream.Close()
+	if err != nil {
+		return
+	}
+
+	time.Sleep(2 * time.Second)
+
+	noFilter := nostr.Filter{}
+	events1, err := store1.QueryEvents(noFilter)
+	events2, err := store2.QueryEvents(noFilter)
+	if len(events1) != len(events2) {
+		t.Fatalf("Events mismatch %d != %d", len(events1), len(events2))
+	}
+
+	// events are already sorted by QueryEvents
+	for i, _ := range events1 {
+		if !EventsEqual(events1[i], events2[i]) {
+			t.Fatalf("Event mismatch at index %d: First event\n%s, Second event\n%s", i, events1[i], events2[i])
+		}
+	}
 
 }
