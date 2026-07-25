@@ -680,8 +680,10 @@ func validateCloneTag(cloneURL, rTag, nTag, aTag, eventPubkey string) string {
 
 	// Cross-validate: clone URL 'repo_author' must be consistent with ownership
 	if aTag != "" {
-		// Org repo: repo_author should be the org address (e.g. 39504:pubkey:dtag)
-		if cloneRepoAuthor != aTag {
+		// Org clone URLs use a filesystem-safe underscore encoding of the canonical
+		// NIP-33 address. Accept either exact representation of the same address.
+		encodedATag := strings.ReplaceAll(aTag, ":", "_")
+		if cloneRepoAuthor != aTag && cloneRepoAuthor != encodedATag {
 			return fmt.Sprintf("Clone tag 'repo_author' parameter (%s) does not match 'a' tag (%s) for org repo", cloneRepoAuthor, aTag)
 		}
 	} else {
