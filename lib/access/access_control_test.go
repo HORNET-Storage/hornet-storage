@@ -401,14 +401,67 @@ func TestCanWriteEventValidatesOrganizationProofChain(t *testing.T) {
 			{"a", orgAddress},
 		},
 	}
+	if err := accessControl.CanWriteEvent(firstOrganizationRepository, store); err == nil {
+		t.Fatal("expected organization membership alone to be insufficient for creating the first repository permission event")
+	}
+
+	// The first permission event still succeeds when the publisher has ordinary relay
+	// write admission. Organization membership is then validated by the kind 31415 handler.
+	if err := store.GetStatsStore().AddAllowedUser(owner, true, "", "test"); err != nil {
+		t.Fatalf("AddAllowedUser(owner): %v", err)
+	}
+	accessControl = access.NewAccessControl(store.GetStatsStore(), &types.AllowedUsersSettings{
+		Mode:                    "invite-only",
+		Read:                    "allowed_users",
+		Write:                   "allowed_users",
+		RepoAccessOverrideKinds: []int{73, 31415},
+	})
+	firstOrganizationRepository.PubKey = owner
 	if err := accessControl.CanWriteEvent(firstOrganizationRepository, store); err != nil {
-		t.Fatalf("expected active organization member to pass access control for the first repository permission event: %v", err)
+		t.Fatalf("expected an ordinarily admitted organization owner to create the first repository permission event: %v", err)
 	}
 	firstOrganizationRepository.ID = accessTestEventID(48)
 	firstOrganizationRepository.CreatedAt = nostr.Timestamp(107)
 	if err := store.StoreEvent(firstOrganizationRepository); err != nil {
 		t.Fatalf("StoreEvent(first organization repository): %v", err)
 	}
+
+	// Recreate access control after removing the owner's global admission so the checks
+	// below exercise repository-scoped overrides rather than the global access cache.
+	if err := store.GetStatsStore().RemoveAllowedUser(owner); err != nil {
+		t.Fatalf("RemoveAllowedUser(owner): %v", err)
+	}
+	accessControl = access.NewAccessControl(store.GetStatsStore(), &types.AllowedUsersSettings{
+		Mode:                    "invite-only",
+		Read:                    "allowed_users",
+		Write:                   "allowed_users",
+		RepoAccessOverrideKinds: []int{73, 31415},
+	})
+
+	ownerPermissionUpdate := &nostr.Event{
+		PubKey: owner,
+		Kind:   31415,
+		Tags: nostr.Tags{
+			{"r", "55555555-5555-5555-5555-555555555555"},
+			{"a", orgAddress},
+		},
+	}
+	if err := accessControl.CanWriteEvent(ownerPermissionUpdate, store); err != nil {
+		t.Fatalf("expected the organization owner to update repository permissions through the repository override: %v", err)
+	}
+
+	memberPermissionUpdate := &nostr.Event{
+		PubKey: member,
+		Kind:   31415,
+		Tags: nostr.Tags{
+			{"r", "55555555-5555-5555-5555-555555555555"},
+			{"a", orgAddress},
+		},
+	}
+	if err := accessControl.CanWriteEvent(memberPermissionUpdate, store); err == nil {
+		t.Fatal("expected an ordinary organization member to be denied permission-event updates")
+	}
+
 	memberPush := &nostr.Event{
 		PubKey: member,
 		Kind:   73,

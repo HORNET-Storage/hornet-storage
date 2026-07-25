@@ -700,33 +700,28 @@ func (ac *AccessControl) canWriteRepositoryEvent(event *nostr.Event, store store
 	permissionEvents, err := store.QueryEvents(nostr.Filter{
 		Kinds: []int{repositoryPermissionEventKind},
 		Tags:  nostr.TagMap{"r": []string{repoID}},
-		Limit: 1,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to query repository permission event: %w", err)
 	}
-	if len(permissionEvents) == 0 {
-		if event.Kind == repositoryPermissionEventKind {
-			organizationAddressValue := firstTagValue(event.Tags, "a")
-			if organizationAddressValue != "" {
-				organizationAddress, parseErr := organization.ParseAddress(organizationAddressValue)
-				if parseErr != nil {
-					return fmt.Errorf("invalid organization repository address: %w", parseErr)
-				}
-				isMember, membershipErr := organization.IsMember(store, pubkey, organizationAddress)
-				if membershipErr != nil {
-					return fmt.Errorf("failed to verify organization repository creator: %w", membershipErr)
-				}
-				if isMember {
-					return nil
-				}
-				return fmt.Errorf("pubkey is not an active member of the repository organization")
-			}
-		}
+	permissionEvent := latestRepositoryPermissionEvent(permissionEvents)
+	if permissionEvent == nil {
+		// Repository-scoped authority cannot exist before the first permission event.
+		// Because this override is reached only after ordinary relay write admission failed,
+		// organization membership must not be allowed to bootstrap a repository here.
 		return fmt.Errorf("repository permission event not found")
 	}
 
-	isOrganizationRepo, isMember, membershipErr := organizationMembershipAllows(permissionEvents[0], pubkey, store)
+	// Permission policy is administrative state, not an ordinary repository write.
+	// Match the kind 31415 handler: personal repositories are controlled by their
+	// current event author, while organization repositories are controlled by the
+	// organization owner. Ordinary organization membership remains sufficient only
+	// for non-administrative repository operations below.
+	if event.Kind == repositoryPermissionEventKind {
+		return canUpdateRepositoryPermissionEvent(permissionEvent, pubkey, store)
+	}
+
+	isOrganizationRepo, isMember, membershipErr := organizationMembershipAllows(permissionEvent, pubkey, store)
 	if membershipErr != nil {
 		return fmt.Errorf("failed to check organization membership: %w", membershipErr)
 	}
@@ -739,25 +734,25 @@ func (ac *AccessControl) canWriteRepositoryEvent(event *nostr.Event, store store
 
 	// Check standard role-based access first
 	if repositoryEventRequiresDagWrite(event) {
-		if repoPermissionAllowsDagWrite(permissionEvents[0], pubkey) {
+		if repoPermissionAllowsDagWrite(permissionEvent, pubkey) {
 			return nil
 		}
-	} else if repoPermissionAllowsEventWrite(permissionEvents[0], pubkey) {
+	} else if repoPermissionAllowsEventWrite(permissionEvent, pubkey) {
 		return nil
 	}
 
 	// Standard role check failed — try interaction permission fallback
 	interactionTag := interactionPermissionTagForEvent(event)
 	if interactionTag != "" {
-		permLevel := strings.ToLower(strings.TrimSpace(firstTagValue(permissionEvents[0].Tags, interactionTag)))
+		permLevel := strings.ToLower(strings.TrimSpace(firstTagValue(permissionEvent.Tags, interactionTag)))
 
 		// WoT check: use the WOT cache for real follow-distance verification
 		if permLevel == interactionPermissionWot {
-			if ac.repoWotPermissionAllowsWrite(permissionEvents[0], pubkey) {
+			if ac.repoWotPermissionAllowsWrite(permissionEvent, pubkey) {
 				logging.Debugf("[ACCESS CONTROL] WoT permission override granted for pubkey %s on kind %d via %s", pubkey, event.Kind, interactionTag)
 				return nil
 			}
-		} else if repoInteractionPermissionAllowsWrite(permissionEvents[0], pubkey, interactionTag) {
+		} else if repoInteractionPermissionAllowsWrite(permissionEvent, pubkey, interactionTag) {
 			logging.Debugf("[ACCESS CONTROL] Repository interaction permission override granted for pubkey %s on kind %d via %s", pubkey, event.Kind, interactionTag)
 			return nil
 		}
@@ -768,6 +763,38 @@ func (ac *AccessControl) canWriteRepositoryEvent(event *nostr.Event, store store
 		return fmt.Errorf("pubkey does not have repository DAG write access")
 	}
 	return fmt.Errorf("pubkey does not have repository event write access")
+}
+
+func canUpdateRepositoryPermissionEvent(permissionEvent *nostr.Event, pubkey string, store stores.Store) error {
+	if permissionEvent == nil {
+		return fmt.Errorf("repository permission event not found")
+	}
+
+	organizationAddressValue := strings.TrimSpace(firstTagValue(permissionEvent.Tags, "a"))
+	if organizationAddressValue == "" {
+		if strings.ToLower(strings.TrimSpace(permissionEvent.PubKey)) == pubkey {
+			return nil
+		}
+		return fmt.Errorf("only the repository owner may update repository permissions")
+	}
+
+	organizationAddress, err := organization.ParseAddress(organizationAddressValue)
+	if err != nil {
+		return fmt.Errorf("invalid repository organization address: %w", err)
+	}
+	if strings.ToLower(strings.TrimSpace(organizationAddress.Owner)) != pubkey {
+		return fmt.Errorf("only the organization owner may update repository permissions")
+	}
+
+	isMember, err := organization.IsMember(store, pubkey, organizationAddress)
+	if err != nil {
+		return fmt.Errorf("failed to verify repository organization owner: %w", err)
+	}
+	if !isMember {
+		return fmt.Errorf("organization owner is not an active member of the repository organization")
+	}
+
+	return nil
 }
 
 func organizationMembershipAllows(permissionEvent *nostr.Event, pubkey string, store stores.Store) (bool, bool, error) {
