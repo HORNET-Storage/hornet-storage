@@ -10,17 +10,10 @@ import (
 
 	lib_nostr "github.com/HORNET-Storage/hornet-storage/lib/handlers/nostr"
 	"github.com/HORNET-Storage/hornet-storage/lib/logging"
+	"github.com/HORNET-Storage/hornet-storage/lib/organization"
 	"github.com/HORNET-Storage/hornet-storage/lib/stores"
 	"github.com/HORNET-Storage/hornet-storage/lib/wot"
 	"github.com/nbd-wtf/go-nostr"
-)
-
-// Organization event kinds
-const (
-	OrgEventKind              = 39504
-	OrgInvitationKind         = 39505
-	OrgInvitationResponseKind = 39506
-	DeletionEventKind         = 5
 )
 
 // uuidRegex matches UUID v4 format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
@@ -283,108 +276,22 @@ func parseOwnership(aTag, rTag string, eventPubkey string) (bool, string, string
 
 // verifyPublisherPermission checks if the publisher has permission to create/update the event
 func verifyPublisherPermission(store stores.Store, publisherPubkey string, isOrgRepo bool, ownerPubkey string, orgDtag string, isFirstEvent bool, isMigrationToOrg bool) bool {
+	publisherPubkey = strings.ToLower(strings.TrimSpace(publisherPubkey))
+	ownerPubkey = strings.ToLower(strings.TrimSpace(ownerPubkey))
 	if !isOrgRepo {
-		// Regular repo: only the owner can create/update
 		return publisherPubkey == ownerPubkey
 	}
 
-	// Org repo
+	isMember, err := organization.IsMember(store, publisherPubkey, organization.Address{Owner: ownerPubkey, DTag: orgDtag})
+	if err != nil {
+		logging.Infof("[Kind31415] Organization authorization failed for %s: %v", publisherPubkey, err)
+		return false
+	}
 	if isFirstEvent || isMigrationToOrg {
-		// First event OR migration from personal to org: any verified org member can create/migrate
-		return isVerifiedOrgMember(store, publisherPubkey, ownerPubkey, orgDtag)
-	} else {
-		// Replacement: only the org owner can update
-		return publisherPubkey == ownerPubkey
-	}
-}
-
-// isVerifiedOrgMember checks if a pubkey is a verified member of the organization
-// This includes the org owner and any users who have accepted invitations
-func isVerifiedOrgMember(store stores.Store, pubkey string, orgOwnerPubkey string, orgDtag string) bool {
-	// Org owner is always a member
-	if pubkey == orgOwnerPubkey {
-		logging.Infof("[Kind31415] Pubkey %s is org owner", pubkey)
-		return true
+		return isMember
 	}
 
-	// Build the org address for querying: "39504:orgOwnerPubkey:orgDtag"
-	orgAddress := fmt.Sprintf("%d:%s:%s", OrgEventKind, orgOwnerPubkey, orgDtag)
-
-	logging.Infof("[Kind31415] Checking if %s is a verified member of org %s", pubkey, orgAddress)
-
-	// Query for invitations to this user for this organization
-	invitations, err := store.QueryEvents(nostr.Filter{
-		Kinds:   []int{OrgInvitationKind},
-		Authors: []string{orgOwnerPubkey},
-		Tags: nostr.TagMap{
-			"a": []string{orgAddress},
-			"p": []string{pubkey},
-		},
-	})
-	if err != nil {
-		logging.Errorf("[Kind31415] Error querying invitations: %v", err)
-		return false
-	}
-
-	logging.Infof("[Kind31415] Found %d invitations for pubkey %s", len(invitations), pubkey)
-
-	// Check each invitation for a valid acceptance
-	for _, invitation := range invitations {
-		// Check if the invitation has been deleted
-		if isEventDeleted(store, invitation.ID, orgOwnerPubkey) {
-			logging.Infof("[Kind31415] Invitation %s has been deleted", invitation.ID)
-			continue
-		}
-
-		// Query for acceptance responses to this invitation
-		responses, err := store.QueryEvents(nostr.Filter{
-			Kinds:   []int{OrgInvitationResponseKind},
-			Authors: []string{pubkey},
-			Tags: nostr.TagMap{
-				"e": []string{invitation.ID},
-			},
-		})
-		if err != nil {
-			logging.Errorf("[Kind31415] Error querying invitation responses: %v", err)
-			continue
-		}
-
-		// Check each response for "accepted" status
-		for _, response := range responses {
-			status := getTagValue(response.Tags, "status")
-			if status == "accepted" {
-				// Check if the acceptance has been deleted
-				if isEventDeleted(store, response.ID, pubkey) {
-					logging.Infof("[Kind31415] Acceptance %s has been deleted", response.ID)
-					continue
-				}
-
-				logging.Infof("[Kind31415] Found valid acceptance for pubkey %s (invitation: %s, acceptance: %s)",
-					pubkey, invitation.ID, response.ID)
-				return true
-			}
-		}
-	}
-
-	logging.Infof("[Kind31415] Pubkey %s is NOT a verified org member", pubkey)
-	return false
-}
-
-// isEventDeleted checks if an event has been deleted via a kind 5 deletion event
-func isEventDeleted(store stores.Store, eventID string, authorPubkey string) bool {
-	deletions, err := store.QueryEvents(nostr.Filter{
-		Kinds:   []int{DeletionEventKind},
-		Authors: []string{authorPubkey},
-		Tags: nostr.TagMap{
-			"e": []string{eventID},
-		},
-	})
-	if err != nil {
-		logging.Errorf("[Kind31415] Error checking deletion status: %v", err)
-		return false
-	}
-
-	return len(deletions) > 0
+	return publisherPubkey == ownerPubkey && isMember
 }
 
 // isValidHexPubkey checks if a string is a valid 64-character hex public key

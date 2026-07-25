@@ -1,8 +1,10 @@
 package config
 
 import (
+	"slices"
 	"testing"
 
+	"github.com/HORNET-Storage/hornet-storage/lib/types"
 	"github.com/spf13/viper"
 )
 
@@ -74,5 +76,24 @@ func TestNormalizeRelayDHTConfigValuesKeepsNewSeed(t *testing.T) {
 
 	if got := viper.GetString("relay.dht_seed"); got != "new-seed" {
 		t.Fatalf("expected relay.dht_seed to be preserved, got %q", got)
+	}
+}
+
+func TestNormalizeOrganizationKindsAppendsMissingValuesAndIsIdempotent(t *testing.T) {
+	config := &types.Config{}
+	config.EventFiltering.RegisteredKinds = []int{1, 39505}
+	config.EventFiltering.KindWhitelist = []string{"kind1", "custom-handler", "kind39506"}
+
+	normalizeOrganizationKinds(config)
+	normalizeOrganizationKinds(config)
+
+	expectedKinds := []int{1, 39505, 39504, 39506}
+	if got := config.EventFiltering.RegisteredKinds; !slices.Equal(got, expectedKinds) {
+		t.Fatalf("expected registered kinds %v, got %v", expectedKinds, got)
+	}
+
+	expectedWhitelist := []string{"kind1", "custom-handler", "kind39506", "kind39504", "kind39505"}
+	if got := config.EventFiltering.KindWhitelist; !slices.Equal(got, expectedWhitelist) {
+		t.Fatalf("expected kind whitelist %v, got %v", expectedWhitelist, got)
 	}
 }

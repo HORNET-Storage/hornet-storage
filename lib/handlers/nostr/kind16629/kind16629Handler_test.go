@@ -1,9 +1,14 @@
 package kind16629
 
 import (
+	"fmt"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/HORNET-Storage/hornet-storage/lib/stores/badgerhold"
+	"github.com/nbd-wtf/go-nostr"
 )
 
 func cloneURLForValidationTest(repoID, repoAuthor, repoName string) string {
@@ -77,5 +82,96 @@ func TestValidateCloneTagKeepsPersonalAuthorValidation(t *testing.T) {
 	mismatchedCloneURL := cloneURLForValidationTest(repoID, otherPubkey, repoName)
 	if validationError := validateCloneTag(mismatchedCloneURL, repoID, repoName, "", publisherPubkey); validationError == "" {
 		t.Fatal("expected mismatched personal repo author to be rejected")
+	}
+}
+
+func TestVerifyPublisherPermissionRequiresValidOrganizationProof(t *testing.T) {
+	store, err := badgerhold.InitStore(filepath.Join(t.TempDir(), "store"), filepath.Join(t.TempDir(), "stats.db"))
+	if err != nil {
+		t.Fatalf("InitStore: %v", err)
+	}
+	defer store.Cleanup()
+
+	owner := strings.Repeat("a", 64)
+	member := strings.Repeat("b", 64)
+	orgDTag := "nosis-organization-handler-test"
+	orgAddress := fmt.Sprintf("39504:%s:%s", owner, orgDTag)
+
+	if verifyPublisherPermission(store, owner, true, owner, orgDTag, true, false) {
+		t.Fatal("expected organization owner to be denied when the organization event is absent")
+	}
+
+	organizationEvent := &nostr.Event{
+		ID:        fmt.Sprintf("%064x", 1),
+		PubKey:    owner,
+		CreatedAt: nostr.Timestamp(100),
+		Kind:      39504,
+		Tags: nostr.Tags{
+			{"d", orgDTag},
+			{"p", owner, "member"},
+			{"p", member, "member"},
+		},
+	}
+	if err := store.StoreEvent(organizationEvent); err != nil {
+		t.Fatalf("StoreEvent(organization): %v", err)
+	}
+	if !verifyPublisherPermission(store, owner, true, owner, orgDTag, true, false) {
+		t.Fatal("expected organization owner to be allowed after a valid organization exists")
+	}
+	if verifyPublisherPermission(store, member, true, owner, orgDTag, true, false) {
+		t.Fatal("expected listed member without invitation acceptance proof to be denied")
+	}
+
+	invitation := &nostr.Event{
+		ID:        fmt.Sprintf("%064x", 2),
+		PubKey:    owner,
+		CreatedAt: nostr.Timestamp(101),
+		Kind:      39505,
+		Tags: nostr.Tags{
+			{"d", "nosis-org-invite-handler-test"},
+			{"p", member},
+			{"a", orgAddress},
+		},
+	}
+	response := &nostr.Event{
+		ID:        fmt.Sprintf("%064x", 3),
+		PubKey:    member,
+		CreatedAt: nostr.Timestamp(102),
+		Kind:      39506,
+		Tags: nostr.Tags{
+			{"d", "nosis-org-response-nosis-org-invite-handler-test"},
+			{"e", invitation.ID},
+			{"status", "accepted"},
+			{"a", orgAddress},
+		},
+	}
+	for _, event := range []*nostr.Event{invitation, response} {
+		if err := store.StoreEvent(event); err != nil {
+			t.Fatalf("StoreEvent(kind %d): %v", event.Kind, err)
+		}
+	}
+	if !verifyPublisherPermission(store, member, true, owner, orgDTag, true, false) {
+		t.Fatal("expected member with matching owner invitation and accepted response to be allowed")
+	}
+	if verifyPublisherPermission(store, member, true, owner, orgDTag, false, false) {
+		t.Fatal("expected non-owner member to remain unable to replace repository permissions")
+	}
+
+	removedOrganizationEvent := &nostr.Event{
+		ID:        fmt.Sprintf("%064x", 4),
+		PubKey:    owner,
+		CreatedAt: nostr.Timestamp(200),
+		Kind:      39504,
+		Tags: nostr.Tags{
+			{"d", orgDTag},
+			{"p", owner, "member"},
+			{"p", member, "removed"},
+		},
+	}
+	if err := store.StoreEvent(removedOrganizationEvent); err != nil {
+		t.Fatalf("StoreEvent(removed organization): %v", err)
+	}
+	if verifyPublisherPermission(store, member, true, owner, orgDTag, true, false) {
+		t.Fatal("expected member marked removed in the latest organization event to be denied")
 	}
 }

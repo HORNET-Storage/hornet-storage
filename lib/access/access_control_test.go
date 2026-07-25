@@ -6,8 +6,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	merkle_dag "github.com/HORNET-Storage/Scionic-Merkle-Tree/v2/dag"
 	"github.com/HORNET-Storage/hdk-nostr-go/lib/signing"
 	"github.com/HORNET-Storage/hornet-storage/lib/access"
+	"github.com/HORNET-Storage/hornet-storage/lib/organization"
 	"github.com/HORNET-Storage/hornet-storage/lib/stores/badgerhold"
 	"github.com/HORNET-Storage/hornet-storage/lib/types"
 	"github.com/nbd-wtf/go-nostr"
@@ -255,7 +257,7 @@ func TestCanReadDagAllowsMaintainerWhenBundleTagResolvesRepo(t *testing.T) {
 		t.Fatalf("expected maintainer to be allowed to read repo event directly: %v", err)
 	}
 
-	if err := accessControl.CanReadDag(bundleRoot, maintainerPub, hex.EncodeToString(signature.Serialize()), store); err != nil {
+	if err := accessControl.CanReadDag(&merkle_dag.DagLeaf{Hash: bundleRoot}, maintainerPub, hex.EncodeToString(signature.Serialize()), store); err != nil {
 		t.Fatalf("expected maintainer to be allowed to read bundle DAG: %v", err)
 	}
 }
@@ -322,8 +324,358 @@ func TestRepositoryReadOverrideDisabledInOnlyMeMode(t *testing.T) {
 		t.Fatal("expected repo read override to be disabled in only-me mode")
 	}
 
-	if err := accessControl.CanReadDag(bundleRoot, readerPub, hex.EncodeToString(signature.Serialize()), store); err == nil {
+	if err := accessControl.CanReadDag(&merkle_dag.DagLeaf{Hash: bundleRoot}, readerPub, hex.EncodeToString(signature.Serialize()), store); err == nil {
 		t.Fatal("expected DAG read override to be disabled in only-me mode")
+	}
+}
+
+func TestCanWriteEventValidatesOrganizationProofChain(t *testing.T) {
+	store := newAccessTestStore(t)
+	defer store.Cleanup()
+
+	owner := newAccessTestPubkey(t)
+	member := newAccessTestPubkey(t)
+	stranger := newAccessTestPubkey(t)
+	orgDTag := "nosis-organization-access-test"
+	orgAddress := fmt.Sprintf("39504:%s:%s", owner, orgDTag)
+
+	organizationEvent := &nostr.Event{
+		ID:        accessTestEventID(40),
+		PubKey:    owner,
+		CreatedAt: nostr.Timestamp(100),
+		Kind:      39504,
+		Tags: nostr.Tags{
+			{"d", orgDTag},
+			{"p", owner, "member"},
+			{"p", member, "member"},
+		},
+	}
+	invitation := &nostr.Event{
+		ID:        accessTestEventID(41),
+		PubKey:    owner,
+		CreatedAt: nostr.Timestamp(101),
+		Kind:      39505,
+		Tags: nostr.Tags{
+			{"d", "nosis-org-invite-access-test"},
+			{"p", member},
+			{"a", orgAddress},
+		},
+	}
+	responseDTag := "nosis-org-response-nosis-org-invite-access-test"
+	response := &nostr.Event{
+		ID:        accessTestEventID(42),
+		PubKey:    member,
+		CreatedAt: nostr.Timestamp(102),
+		Kind:      39506,
+		Tags: nostr.Tags{
+			{"d", responseDTag},
+			{"e", invitation.ID},
+			{"status", "accepted"},
+			{"a", orgAddress},
+		},
+	}
+	for _, event := range []*nostr.Event{organizationEvent, invitation, response} {
+		if err := store.StoreEvent(event); err != nil {
+			t.Fatalf("StoreEvent(kind %d): %v", event.Kind, err)
+		}
+	}
+
+	accessControl := access.NewAccessControl(store.GetStatsStore(), &types.AllowedUsersSettings{
+		Mode:                    "invite-only",
+		Read:                    "allowed_users",
+		Write:                   "allowed_users",
+		RepoAccessOverrideKinds: []int{73, 31415},
+	})
+
+	if err := accessControl.CanWriteEvent(invitation, store); err != nil {
+		t.Fatalf("expected valid owner invitation to be allowed: %v", err)
+	}
+	if err := accessControl.CanWriteEvent(response, store); err != nil {
+		t.Fatalf("expected valid invitee response to be allowed: %v", err)
+	}
+	firstOrganizationRepository := &nostr.Event{
+		PubKey: member,
+		Kind:   31415,
+		Tags: nostr.Tags{
+			{"r", "55555555-5555-5555-5555-555555555555"},
+			{"a", orgAddress},
+		},
+	}
+	if err := accessControl.CanWriteEvent(firstOrganizationRepository, store); err != nil {
+		t.Fatalf("expected active organization member to pass access control for the first repository permission event: %v", err)
+	}
+	firstOrganizationRepository.ID = accessTestEventID(48)
+	firstOrganizationRepository.CreatedAt = nostr.Timestamp(107)
+	if err := store.StoreEvent(firstOrganizationRepository); err != nil {
+		t.Fatalf("StoreEvent(first organization repository): %v", err)
+	}
+	memberPush := &nostr.Event{
+		PubKey: member,
+		Kind:   73,
+		Tags: nostr.Tags{
+			{"r", "55555555-5555-5555-5555-555555555555"},
+		},
+	}
+	if err := accessControl.CanWriteEvent(memberPush, store); err != nil {
+		t.Fatalf("expected active organization member to write subsequent repository events: %v", err)
+	}
+	strangerPush := &nostr.Event{
+		PubKey: stranger,
+		Kind:   73,
+		Tags: nostr.Tags{
+			{"r", "55555555-5555-5555-5555-555555555555"},
+		},
+	}
+	if err := accessControl.CanWriteEvent(strangerPush, store); err == nil {
+		t.Fatal("expected a non-member without an explicit repository role to be denied")
+	}
+
+	// Global relay write access must not bypass organization proof validation.
+	if err := store.GetStatsStore().AddAllowedUser(stranger, true, "", "test"); err != nil {
+		t.Fatalf("AddAllowedUser(stranger): %v", err)
+	}
+
+	forgedInvitation := &nostr.Event{
+		PubKey: stranger,
+		Kind:   39505,
+		Tags: nostr.Tags{
+			{"d", "forged-invite"},
+			{"p", member},
+			{"a", orgAddress},
+		},
+	}
+	if err := accessControl.CanWriteEvent(forgedInvitation, store); err == nil {
+		t.Fatal("expected invitation not authored by the organization owner to be denied")
+	}
+
+	forgedResponse := &nostr.Event{
+		PubKey: stranger,
+		Kind:   39506,
+		Tags: nostr.Tags{
+			{"d", responseDTag},
+			{"e", invitation.ID},
+			{"status", "accepted"},
+			{"a", orgAddress},
+		},
+	}
+	if err := accessControl.CanWriteEvent(forgedResponse, store); err == nil {
+		t.Fatal("expected response author that does not match the invitee to be denied")
+	}
+
+	validLeave := &nostr.Event{
+		ID:        accessTestEventID(44),
+		PubKey:    member,
+		CreatedAt: nostr.Timestamp(103),
+		Kind:      5,
+		Tags: nostr.Tags{
+			{"e", response.ID},
+			{"a", fmt.Sprintf("39506:%s:%s", member, responseDTag)},
+			{"k", "39506"},
+		},
+	}
+	if err := accessControl.CanWriteEvent(validLeave, store); err != nil {
+		t.Fatalf("expected invitee to be allowed to delete their own current response: %v", err)
+	}
+	if err := store.StoreEvent(validLeave); err != nil {
+		t.Fatalf("StoreEvent(valid leave tombstone): %v", err)
+	}
+	if active, err := organization.IsMember(store, member, organization.Address{Owner: owner, DTag: orgDTag}); err != nil {
+		t.Fatalf("IsMember after leave: %v", err)
+	} else if active {
+		t.Fatal("expected stored response tombstone to revoke organization membership")
+	}
+	if err := accessControl.CanWriteEvent(memberPush, store); err == nil {
+		t.Fatal("expected a departed organization member to be denied despite stale permission-event roles")
+	}
+	if err := accessControl.CanWriteEvent(response, store); err == nil {
+		t.Fatal("expected an older tombstoned response to be denied")
+	}
+
+	futureInvitation := &nostr.Event{
+		ID:        accessTestEventID(45),
+		PubKey:    owner,
+		CreatedAt: nostr.Timestamp(104),
+		Kind:      39505,
+		Tags: nostr.Tags{
+			{"d", "nosis-org-invite-future-test"},
+			{"p", member},
+			{"a", orgAddress},
+		},
+	}
+	futureResponse := &nostr.Event{
+		ID:        accessTestEventID(46),
+		PubKey:    member,
+		CreatedAt: nostr.Timestamp(105),
+		Kind:      39506,
+		Tags: nostr.Tags{
+			{"d", "nosis-org-response-nosis-org-invite-future-test"},
+			{"e", futureInvitation.ID},
+			{"status", "accepted"},
+			{"a", orgAddress},
+		},
+	}
+	if err := store.StoreEvent(futureInvitation); err != nil {
+		t.Fatalf("StoreEvent(future invitation): %v", err)
+	}
+	preemptiveTombstone := &nostr.Event{
+		ID:        accessTestEventID(47),
+		PubKey:    member,
+		CreatedAt: nostr.Timestamp(106),
+		Kind:      5,
+		Tags: nostr.Tags{
+			{"e", futureResponse.ID},
+			{"a", fmt.Sprintf("39506:%s:%s", member, "nosis-org-response-nosis-org-invite-future-test")},
+			{"k", "39506"},
+		},
+	}
+	if err := accessControl.CanWriteEvent(preemptiveTombstone, store); err != nil {
+		t.Fatalf("expected an author-owned organization tombstone to be retained before its source arrives: %v", err)
+	}
+	if err := store.StoreEvent(preemptiveTombstone); err != nil {
+		t.Fatalf("StoreEvent(preemptive tombstone): %v", err)
+	}
+	if err := accessControl.CanWriteEvent(futureResponse, store); err == nil {
+		t.Fatal("expected preemptive tombstone to prevent older response resurrection")
+	}
+
+	removedOrganizationEvent := &nostr.Event{
+		ID:        accessTestEventID(43),
+		PubKey:    owner,
+		CreatedAt: nostr.Timestamp(200),
+		Kind:      39504,
+		Tags: nostr.Tags{
+			{"d", orgDTag},
+			{"p", owner, "member"},
+			{"p", member, "removed"},
+		},
+	}
+	if err := store.StoreEvent(removedOrganizationEvent); err != nil {
+		t.Fatalf("StoreEvent(removed organization): %v", err)
+	}
+	if err := accessControl.CanWriteEvent(response, store); err == nil {
+		t.Fatal("expected response from a member marked removed by the latest organization event to be denied")
+	}
+}
+
+func TestCanReadEventAllowsRequiredOrganizationAuthorizationProof(t *testing.T) {
+	store := newAccessTestStore(t)
+	defer store.Cleanup()
+
+	owner := newAccessTestPubkey(t)
+	member := newAccessTestPubkey(t)
+	stranger := newAccessTestPubkey(t)
+	orgDTag := "nosis-organization-read-proof-test"
+	orgAddress := fmt.Sprintf("39504:%s:%s", owner, orgDTag)
+	repoID := "66666666-6666-6666-6666-666666666666"
+
+	organizationEvent := &nostr.Event{
+		ID:        accessTestEventID(60),
+		PubKey:    owner,
+		CreatedAt: nostr.Timestamp(100),
+		Kind:      organization.EventKind,
+		Tags: nostr.Tags{
+			{"d", orgDTag},
+			{"p", owner, "member"},
+			{"p", member, "member"},
+		},
+	}
+	invitation := &nostr.Event{
+		ID:        accessTestEventID(61),
+		PubKey:    owner,
+		CreatedAt: nostr.Timestamp(101),
+		Kind:      organization.InvitationKind,
+		Tags: nostr.Tags{
+			{"d", "nosis-org-invite-read-proof-test"},
+			{"p", member},
+			{"a", orgAddress},
+		},
+	}
+	response := &nostr.Event{
+		ID:        accessTestEventID(62),
+		PubKey:    member,
+		CreatedAt: nostr.Timestamp(102),
+		Kind:      organization.InvitationResponseKind,
+		Tags: nostr.Tags{
+			{"d", "nosis-org-response-nosis-org-invite-read-proof-test"},
+			{"e", invitation.ID},
+			{"status", "accepted"},
+			{"a", orgAddress},
+		},
+	}
+	for _, event := range []*nostr.Event{organizationEvent, invitation, response} {
+		if err := store.StoreEvent(event); err != nil {
+			t.Fatalf("StoreEvent(kind %d): %v", event.Kind, err)
+		}
+	}
+
+	privatePermission := &nostr.Event{
+		ID:        accessTestEventID(63),
+		PubKey:    owner,
+		CreatedAt: nostr.Timestamp(103),
+		Kind:      31415,
+		Tags: nostr.Tags{
+			{"r", repoID},
+			{"a", orgAddress},
+			{"visibility", "private"},
+		},
+	}
+	if err := store.StoreEvent(privatePermission); err != nil {
+		t.Fatalf("StoreEvent(private permission): %v", err)
+	}
+
+	accessControl := access.NewAccessControl(store.GetStatsStore(), &types.AllowedUsersSettings{
+		Mode:                    "invite-only",
+		Read:                    "allowed_users",
+		Write:                   "allowed_users",
+		RepoAccessOverrideKinds: []int{73, 31415},
+	})
+	proofEvents := []*nostr.Event{organizationEvent, invitation, response}
+
+	for _, event := range proofEvents {
+		if err := accessControl.CanReadEvent(event, member, store); err != nil {
+			t.Fatalf("expected active member to read private organization proof kind %d: %v", event.Kind, err)
+		}
+		if err := accessControl.CanReadEvent(event, stranger, store); err == nil {
+			t.Fatalf("expected stranger to be denied private organization proof kind %d", event.Kind)
+		}
+	}
+
+	publicPermission := &nostr.Event{
+		ID:        accessTestEventID(64),
+		PubKey:    owner,
+		CreatedAt: nostr.Timestamp(104),
+		Kind:      31415,
+		Tags: nostr.Tags{
+			{"r", repoID},
+			{"a", orgAddress},
+			{"visibility", "public"},
+		},
+	}
+	if err := store.StoreEvent(publicPermission); err != nil {
+		t.Fatalf("StoreEvent(public permission): %v", err)
+	}
+	for _, event := range proofEvents {
+		if err := accessControl.CanReadEvent(event, "", store); err != nil {
+			t.Fatalf("expected anonymous reader to obtain public organization proof kind %d: %v", event.Kind, err)
+		}
+	}
+
+	privateAgain := &nostr.Event{
+		ID:        accessTestEventID(65),
+		PubKey:    owner,
+		CreatedAt: nostr.Timestamp(105),
+		Kind:      31415,
+		Tags: nostr.Tags{
+			{"r", repoID},
+			{"a", orgAddress},
+			{"visibility", "private"},
+		},
+	}
+	if err := store.StoreEvent(privateAgain); err != nil {
+		t.Fatalf("StoreEvent(private-again permission): %v", err)
+	}
+	if err := accessControl.CanReadEvent(organizationEvent, stranger, store); err == nil {
+		t.Fatal("expected the latest private repository state to hide organization proof from strangers")
 	}
 }
 

@@ -194,6 +194,33 @@ func legacyConfigAliasesForKey(key string) []string {
 	}
 }
 
+var requiredOrganizationKinds = []int{39504, 39505, 39506}
+
+func normalizeOrganizationKinds(config *types.Config) {
+	registeredSet := make(map[int]struct{}, len(config.EventFiltering.RegisteredKinds))
+	for _, kind := range config.EventFiltering.RegisteredKinds {
+		registeredSet[kind] = struct{}{}
+	}
+	for _, kind := range requiredOrganizationKinds {
+		if _, exists := registeredSet[kind]; !exists {
+			config.EventFiltering.RegisteredKinds = append(config.EventFiltering.RegisteredKinds, kind)
+			registeredSet[kind] = struct{}{}
+		}
+	}
+
+	whitelistSet := make(map[string]struct{}, len(config.EventFiltering.KindWhitelist))
+	for _, kind := range config.EventFiltering.KindWhitelist {
+		whitelistSet[kind] = struct{}{}
+	}
+	for _, kind := range requiredOrganizationKinds {
+		name := fmt.Sprintf("kind%d", kind)
+		if _, exists := whitelistSet[name]; !exists {
+			config.EventFiltering.KindWhitelist = append(config.EventFiltering.KindWhitelist, name)
+			whitelistSet[name] = struct{}{}
+		}
+	}
+}
+
 // reloadConfigCache loads the configuration from viper into the cache
 func reloadConfigCache() error {
 	normalizeAllowedUsersConfigValues()
@@ -203,6 +230,7 @@ func reloadConfigCache() error {
 	if err := viper.Unmarshal(config); err != nil {
 		return fmt.Errorf("failed to unmarshal config: %w", err)
 	}
+	normalizeOrganizationKinds(config)
 	cachedConfig.Store(config)
 	return nil
 }
@@ -965,15 +993,16 @@ func setDefaults() {
 		10411,        // Relay info kind (NO 10011 or 10022 handlers)
 		11011,        // Relay list kind
 		31415, 16630, // Parameterized replaceable kinds (repository permissions), branch metadata
+		39504, 39505, 39506, // Organization definition, invitations, and responses
 		19841, 19842, 19843, // Subscription kinds
 		22242,               // Auth kind
 		30000, 30008, 30009, // Parameterized replaceable kinds
 		30023, 30078, 30079, 30301, 30302, // Long-form content kinds
-		31416,                              // Release artifact sets (parameterized replaceable)
-		30303,                              // Repository blacklist (parameterized replaceable)
+		31416, // Release artifact sets (parameterized replaceable)
+		30303, // Repository blacklist (parameterized replaceable)
 	})
 	viper.SetDefault("event_filtering.moderation_mode", "strict")
-	viper.SetDefault("event_filtering.kind_whitelist", []string{"kind0", "kind1", "kind22242", "kind10010", "kind19841", "kind19842", "kind19843", "kind10002", "kind1111", "kind1808", "kind1809", "kind443", "kind444", "kind445", "kind1059", "kind10051", "kind72", "kind73", "kind74", "kind75", "kind76", "kind77", "kind6927", "kind7007", "kind31415", "kind16630", "kind31416", "kind30078", "kind30301", "kind30302", "kind30303"})
+	viper.SetDefault("event_filtering.kind_whitelist", []string{"kind0", "kind1", "kind22242", "kind10010", "kind19841", "kind19842", "kind19843", "kind10002", "kind1111", "kind1808", "kind1809", "kind443", "kind444", "kind445", "kind1059", "kind10051", "kind72", "kind73", "kind74", "kind75", "kind76", "kind77", "kind6927", "kind7007", "kind31415", "kind16630", "kind31416", "kind30078", "kind30301", "kind30302", "kind30303", "kind39504", "kind39505", "kind39506"})
 	viper.SetDefault("event_filtering.dynamic_kinds.enabled", false)
 	viper.SetDefault("event_filtering.dynamic_kinds.allowed_kinds", []int{})
 	viper.SetDefault("event_filtering.protocols.enabled", false)
@@ -1097,6 +1126,9 @@ func setDefaults() {
 		"16630": "888", // Custom HORNETS (branch metadata)
 		"31416": "888", // Release artifact sets
 		"30303": "888", // Custom HORNETS (repository blacklist)
+		"39504": "888", // Nosis organization definition
+		"39505": "888", // Nosis organization invitation
+		"39506": "888", // Nosis organization invitation response
 
 		// Additional kinds
 		"10010": "51",  // Additional list type

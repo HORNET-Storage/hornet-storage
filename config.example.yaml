@@ -70,6 +70,9 @@ event_filtering:
         - kind11011
         - kind31415
         - kind16630
+        - kind39504
+        - kind39505
+        - kind39506
         - kind19841
         - kind19842
         - kind19843
@@ -171,6 +174,9 @@ event_filtering:
         - 11011
         - 31415
         - 16630
+        - 39504
+        - 39505
+        - 39506
         - 19841
         - 19842
         - 19843

@@ -751,7 +751,9 @@ func TestKind31415_OrgRepo_MemberCanCreateFirst(t *testing.T) {
 	conn.Publish(ctx, *orgEvent)
 
 	// Create invitation for member
+	inviteDTag := "nosis-org-invite-member-can-create"
 	inviteTags := nostr.Tags{
+		{"d", inviteDTag},
 		{"a", orgAddress},
 		{"p", member.PublicKey},
 		{"role", "developer"},
@@ -761,8 +763,10 @@ func TestKind31415_OrgRepo_MemberCanCreateFirst(t *testing.T) {
 
 	// Member accepts invitation
 	acceptTags := nostr.Tags{
+		{"d", "nosis-org-response-" + inviteDTag},
 		{"e", inviteEvent.ID},
 		{"status", "accepted"},
+		{"a", orgAddress},
 	}
 	acceptEvent, _ := helpers.CreateGenericEvent(member, 39506, "", acceptTags)
 	conn.Publish(ctx, *acceptEvent)
@@ -849,7 +853,9 @@ func TestKind31415_OrgRepo_OnlyOwnerCanUpdate(t *testing.T) {
 	conn.Publish(ctx, *orgEvent)
 
 	// Create and accept invitation for member
+	inviteDTag := "nosis-org-invite-owner-update"
 	inviteTags := nostr.Tags{
+		{"d", inviteDTag},
 		{"a", orgAddress},
 		{"p", member.PublicKey},
 	}
@@ -857,8 +863,10 @@ func TestKind31415_OrgRepo_OnlyOwnerCanUpdate(t *testing.T) {
 	conn.Publish(ctx, *inviteEvent)
 
 	acceptTags := nostr.Tags{
+		{"d", "nosis-org-response-" + inviteDTag},
 		{"e", inviteEvent.ID},
 		{"status", "accepted"},
+		{"a", orgAddress},
 	}
 	acceptEvent, _ := helpers.CreateGenericEvent(member, 39506, "", acceptTags)
 	conn.Publish(ctx, *acceptEvent)
@@ -953,7 +961,9 @@ func TestKind31415_OrgRepo_DeletedInvitationInvalidatesMembership(t *testing.T) 
 	conn.Publish(ctx, *orgEvent)
 
 	// Create invitation
+	inviteDTag := "nosis-org-invite-deleted"
 	inviteTags := nostr.Tags{
+		{"d", inviteDTag},
 		{"a", orgAddress},
 		{"p", member.PublicKey},
 	}
@@ -962,8 +972,10 @@ func TestKind31415_OrgRepo_DeletedInvitationInvalidatesMembership(t *testing.T) 
 
 	// Member accepts
 	acceptTags := nostr.Tags{
+		{"d", "nosis-org-response-" + inviteDTag},
 		{"e", inviteEvent.ID},
 		{"status", "accepted"},
+		{"a", orgAddress},
 	}
 	acceptEvent, _ := helpers.CreateGenericEvent(member, 39506, "", acceptTags)
 	conn.Publish(ctx, *acceptEvent)
@@ -971,6 +983,8 @@ func TestKind31415_OrgRepo_DeletedInvitationInvalidatesMembership(t *testing.T) 
 	// Org owner deletes the invitation (kind 5)
 	deleteTags := nostr.Tags{
 		{"e", inviteEvent.ID},
+		{"a", fmt.Sprintf("39505:%s:%s", orgOwner.PublicKey, inviteDTag)},
+		{"k", "39505"},
 	}
 	deleteEvent, _ := helpers.CreateGenericEvent(orgOwner, 5, "Removed from org", deleteTags)
 	conn.Publish(ctx, *deleteEvent)
@@ -1015,6 +1029,7 @@ func TestKind31415_OrgRepo_PendingInvitationNotValid(t *testing.T) {
 
 	// Create invitation (but don't accept it)
 	inviteTags := nostr.Tags{
+		{"d", "nosis-org-invite-pending"},
 		{"a", orgAddress},
 		{"p", invitedUser.PublicKey},
 	}

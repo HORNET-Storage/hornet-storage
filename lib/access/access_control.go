@@ -13,6 +13,7 @@ import (
 	"github.com/HORNET-Storage/hdk-nostr-go/lib/signing"
 	"github.com/HORNET-Storage/hornet-storage/lib/config"
 	"github.com/HORNET-Storage/hornet-storage/lib/logging"
+	"github.com/HORNET-Storage/hornet-storage/lib/organization"
 	"github.com/HORNET-Storage/hornet-storage/lib/stores"
 	"github.com/HORNET-Storage/hornet-storage/lib/stores/statistics"
 	"github.com/HORNET-Storage/hornet-storage/lib/types"
@@ -86,13 +87,36 @@ func (ac *AccessControl) CanWriteEvent(event *nostr.Event, store stores.Store) e
 		return fmt.Errorf("event is required")
 	}
 
+	isOrganizationEvent := event.Kind == organization.EventKind ||
+		event.Kind == organization.InvitationKind ||
+		event.Kind == organization.InvitationResponseKind
+	isOrganizationDeletion := event.Kind == organization.DeletionKind &&
+		strings.HasPrefix(firstTagValue(event.Tags, "a"), "3950")
+
 	writeErr := ac.CanWrite(event.PubKey)
 	if writeErr == nil {
+		if isOrganizationEvent || isOrganizationDeletion {
+			if store == nil {
+				return fmt.Errorf("organization event validation requires a store")
+			}
+			if err := organization.ValidateAuthorizedWrite(event, store); err != nil {
+				return fmt.Errorf("invalid organization authorization event: %w", err)
+			}
+		}
 		return nil
 	}
 
 	if !ac.repoAccessOverrideEnabled() || store == nil {
 		return writeErr
+	}
+
+	if isOrganizationEvent || isOrganizationDeletion {
+		if err := organization.ValidateWriteOverride(event, store); err != nil {
+			logging.Debugf("[ACCESS CONTROL] Organization access override denied for pubkey %s on kind %d: %v", event.PubKey, event.Kind, err)
+			return fmt.Errorf("%w: invalid organization authorization event: %v", writeErr, err)
+		}
+		logging.Debugf("[ACCESS CONTROL] Organization access override granted for pubkey %s on kind %d", event.PubKey, event.Kind)
+		return nil
 	}
 
 	if err := ac.canWriteRepositoryEvent(event, store); err != nil {
@@ -114,7 +138,18 @@ func (ac *AccessControl) CanReadEvent(event *nostr.Event, requesterPubkey string
 		return nil
 	}
 
-	if store == nil || !ac.repoReadOverrideEnabled() || !ac.isRepositoryEventEligible(event) {
+	if store == nil || !ac.repoReadOverrideEnabled() {
+		return globalReadErr
+	}
+
+	// Organization definitions, invitations, and acceptance responses do not
+	// carry repository r tags. They are nevertheless required proof for clients
+	// to authorize organization-owned repository events.
+	if canReadOrganizationAuthorizationEvent(event, requesterPubkey, store) {
+		return nil
+	}
+
+	if !ac.isRepositoryEventEligible(event) {
 		return globalReadErr
 	}
 
@@ -128,6 +163,13 @@ func (ac *AccessControl) CanReadEvent(event *nostr.Event, requesterPubkey string
 	}
 
 	requesterPubkey = strings.ToLower(strings.TrimSpace(requesterPubkey))
+	isOrganizationRepo, isMember, membershipErr := organizationMembershipAllows(permissionEvent, requesterPubkey, store)
+	if isOrganizationRepo {
+		if membershipErr == nil && isMember {
+			return nil
+		}
+		return globalReadErr
+	}
 	if requesterPubkey != "" && repoPermissionAllowsRead(permissionEvent, requesterPubkey) {
 		return nil
 	}
@@ -183,8 +225,17 @@ func (ac *AccessControl) CanReadDag(rootLeaf *merkle_dag.DagLeaf, requesterPubke
 		return nil
 	}
 
-	// Step 7: Private repo → require verified identity + explicit read permission
+	// Step 7: Private repo → require a verified identity. Organization membership
+	// is authoritative for organization repositories; personal repos keep their
+	// explicit permission roles.
 	if requesterPubkey == "" {
+		return globalReadErr
+	}
+	isOrganizationRepo, isMember, membershipErr := organizationMembershipAllows(permissionEvent, requesterPubkey, store)
+	if isOrganizationRepo {
+		if membershipErr == nil && isMember {
+			return nil
+		}
 		return globalReadErr
 	}
 	if repoPermissionAllowsRead(permissionEvent, requesterPubkey) {
@@ -252,7 +303,7 @@ func (ac *AccessControl) CanWriteDag(rootLeaf *merkle_dag.DagLeaf, pubkey string
 			return fmt.Errorf("pubkey is blacklisted from this repository")
 		}
 
-		return ac.canWriteDagWithRepoContext(rootLeaf, pubkey, rTag, permissionEvent)
+		return ac.canWriteDagWithRepoContext(rootLeaf, pubkey, rTag, permissionEvent, store)
 	}
 
 	// Step 4: No "r" tag — fall back to broad collaborator check.
@@ -278,7 +329,7 @@ func (ac *AccessControl) CanWriteDag(rootLeaf *merkle_dag.DagLeaf, pubkey string
 
 // canWriteDagWithRepoContext performs class-based write checks when the precise
 // repo context is known ("r" tag present and permission event resolved).
-func (ac *AccessControl) canWriteDagWithRepoContext(rootLeaf *merkle_dag.DagLeaf, pubkey string, rTag string, permissionEvent *nostr.Event) error {
+func (ac *AccessControl) canWriteDagWithRepoContext(rootLeaf *merkle_dag.DagLeaf, pubkey string, rTag string, permissionEvent *nostr.Event, store stores.Store) error {
 	if rootLeaf != nil && rootLeaf.AdditionalData != nil && rootLeaf.AdditionalData["wot_file"] == "true" {
 		// WOT file: three-key rule — uploader == wot_owner == permission event author.
 		// Owner only. This also prevents junk from entering the WOT cache.
@@ -288,6 +339,17 @@ func (ac *AccessControl) canWriteDagWithRepoContext(rootLeaf *merkle_dag.DagLeaf
 			return fmt.Errorf("WOT file upload denied: uploader (%s), wot_owner (%s), and repo owner (%s) must all match", pubkey, wotOwner, peAuthor)
 		}
 		return nil
+	}
+
+	isOrganizationRepo, isMember, membershipErr := organizationMembershipAllows(permissionEvent, pubkey, store)
+	if membershipErr != nil {
+		return fmt.Errorf("failed to verify repository organization membership: %w", membershipErr)
+	}
+	if isOrganizationRepo {
+		if isMember {
+			return nil
+		}
+		return fmt.Errorf("pubkey %s is not an active member of the repository organization", pubkey)
 	}
 
 	if rootLeaf != nil && rootLeaf.AdditionalData != nil && rootLeaf.AdditionalData["pr_bundle"] == "true" {
@@ -336,11 +398,18 @@ func (ac *AccessControl) isRepoOwnerOrCollaborator(pubkey string, store stores.S
 	}
 
 	for _, event := range permissionEvents {
-		// Repo owner can always upload
+		isOrganizationRepo, isMember, membershipErr := organizationMembershipAllows(event, pubkey, store)
+		if isOrganizationRepo {
+			if membershipErr == nil && isMember {
+				return true
+			}
+			continue
+		}
+		// Personal repository owner can always upload.
 		if strings.ToLower(event.PubKey) == pubkey {
 			return true
 		}
-		// Any p tag entry means the user is a collaborator
+		// Any p tag entry means the user is a collaborator.
 		for _, tag := range event.Tags {
 			if len(tag) >= 2 && tag[0] == "p" && strings.ToLower(tag[1]) == pubkey {
 				return true
@@ -637,7 +706,35 @@ func (ac *AccessControl) canWriteRepositoryEvent(event *nostr.Event, store store
 		return fmt.Errorf("failed to query repository permission event: %w", err)
 	}
 	if len(permissionEvents) == 0 {
+		if event.Kind == repositoryPermissionEventKind {
+			organizationAddressValue := firstTagValue(event.Tags, "a")
+			if organizationAddressValue != "" {
+				organizationAddress, parseErr := organization.ParseAddress(organizationAddressValue)
+				if parseErr != nil {
+					return fmt.Errorf("invalid organization repository address: %w", parseErr)
+				}
+				isMember, membershipErr := organization.IsMember(store, pubkey, organizationAddress)
+				if membershipErr != nil {
+					return fmt.Errorf("failed to verify organization repository creator: %w", membershipErr)
+				}
+				if isMember {
+					return nil
+				}
+				return fmt.Errorf("pubkey is not an active member of the repository organization")
+			}
+		}
 		return fmt.Errorf("repository permission event not found")
+	}
+
+	isOrganizationRepo, isMember, membershipErr := organizationMembershipAllows(permissionEvents[0], pubkey, store)
+	if membershipErr != nil {
+		return fmt.Errorf("failed to check organization membership: %w", membershipErr)
+	}
+	if isOrganizationRepo {
+		if isMember {
+			return nil
+		}
+		return fmt.Errorf("pubkey is not an active member of the repository organization")
 	}
 
 	// Check standard role-based access first
@@ -671,6 +768,96 @@ func (ac *AccessControl) canWriteRepositoryEvent(event *nostr.Event, store store
 		return fmt.Errorf("pubkey does not have repository DAG write access")
 	}
 	return fmt.Errorf("pubkey does not have repository event write access")
+}
+
+func organizationMembershipAllows(permissionEvent *nostr.Event, pubkey string, store stores.Store) (bool, bool, error) {
+	if permissionEvent == nil || store == nil {
+		return false, false, nil
+	}
+	addressValue := firstTagValue(permissionEvent.Tags, "a")
+	if addressValue == "" {
+		return false, false, nil
+	}
+	address, err := organization.ParseAddress(addressValue)
+	if err != nil {
+		return true, false, fmt.Errorf("invalid repository organization address: %w", err)
+	}
+	isMember, err := organization.IsMember(store, strings.ToLower(strings.TrimSpace(pubkey)), address)
+	return true, isMember, err
+}
+
+func canReadOrganizationAuthorizationEvent(event *nostr.Event, requesterPubkey string, store stores.Store) bool {
+	address, ok := organizationAuthorizationEventAddress(event)
+	if !ok {
+		return false
+	}
+
+	requesterPubkey = strings.ToLower(strings.TrimSpace(requesterPubkey))
+	if requesterPubkey != "" {
+		isMember, err := organization.IsMember(store, requesterPubkey, address)
+		if err == nil && isMember {
+			return true
+		}
+	}
+
+	return organizationHasPublicRepository(store, address)
+}
+
+func organizationAuthorizationEventAddress(event *nostr.Event) (organization.Address, bool) {
+	if event == nil {
+		return organization.Address{}, false
+	}
+
+	switch event.Kind {
+	case organization.EventKind:
+		address := organization.Address{
+			Owner: strings.ToLower(strings.TrimSpace(event.PubKey)),
+			DTag:  strings.TrimSpace(firstTagValue(event.Tags, "d")),
+		}
+		parsed, err := organization.ParseAddress(address.String())
+		return parsed, err == nil
+	case organization.InvitationKind, organization.InvitationResponseKind:
+		address, err := organization.ParseAddress(firstTagValue(event.Tags, "a"))
+		return address, err == nil
+	default:
+		return organization.Address{}, false
+	}
+}
+
+func organizationHasPublicRepository(store stores.Store, address organization.Address) bool {
+	permissionEvents, err := store.QueryEvents(nostr.Filter{
+		Kinds: []int{repositoryPermissionEventKind},
+		Tags:  nostr.TagMap{"a": []string{address.String()}},
+	})
+	if err != nil {
+		return false
+	}
+
+	eventsByRepository := make(map[string][]*nostr.Event)
+	for _, permissionEvent := range permissionEvents {
+		if permissionEvent == nil {
+			continue
+		}
+		repoID := strings.TrimSpace(firstTagValue(permissionEvent.Tags, "r"))
+		if repoID == "" {
+			continue
+		}
+		eventsByRepository[repoID] = append(eventsByRepository[repoID], permissionEvent)
+	}
+
+	for _, repositoryEvents := range eventsByRepository {
+		permissionEvent := latestRepositoryPermissionEvent(repositoryEvents)
+		if permissionEvent == nil || repositoryPermissionVisibility(permissionEvent) == repositoryVisibilityPrivate {
+			continue
+		}
+
+		isOrganizationRepo, isMember, membershipErr := organizationMembershipAllows(permissionEvent, permissionEvent.PubKey, store)
+		if isOrganizationRepo && membershipErr == nil && isMember {
+			return true
+		}
+	}
+
+	return false
 }
 
 func firstTagValue(tags nostr.Tags, key string) string {

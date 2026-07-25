@@ -35,39 +35,48 @@ func BuildKind5Handler(store stores.Store) func(read lib_nostr.KindReader, write
 			return
 		}
 
-		// Inside handleKindFiveEvents, within the for loop that processes each deletion request
-		for _, tag := range env.Event.Tags {
-			if tag[0] == "e" && len(tag) > 1 {
-				eventID := tag[1]
-				// Retrieve the public key of the event to be deleted
-				pubKey, err := extractPubKeyFromEventID(store, eventID)
-				if err != nil {
-					logging.Infof("Failed to extract public key for event %s: %v", eventID, err)
-					// Decide how to handle this error; continue to next tag, respond with an error, etc.
-					write("NOTICE", fmt.Sprintf("Failed to extract public key for event %s: %v, the event doesn't exist", eventID, err))
-					continue
-				}
-
-				logging.Infof("Found Public key:%s", pubKey)
-
-				// Validate that the deletion request and the event have the same public key
-				if pubKey == env.Event.PubKey {
-					if err := store.DeleteEvent(eventID); err != nil {
-						logging.Infof("Error deleting event %s: %v", eventID, err)
-						// Optionally, handle individual delete failures
-					} else {
-						write("OK", env.Event.ID, true, "Deletion processed")
-					}
-				} else {
-					logging.Infof("Public key mismatch for event %s, deletion request ignored", eventID)
-					write("NOTICE", fmt.Sprintf("Public key mismatch for event %s, deletion request ignored", eventID))
-				}
-			}
+		if err := applyDeletionAndStoreTombstone(store, &env.Event); err != nil {
+			logging.Infof("Failed to process deletion event %s: %v", env.Event.ID, err)
+			write("NOTICE", err.Error())
+			return
 		}
+		write("OK", env.Event.ID, true, "Deletion processed and tombstone stored")
 
 	}
 
 	return handler
+}
+
+func applyDeletionAndStoreTombstone(store stores.Store, event *nostr.Event) error {
+	if event == nil {
+		return fmt.Errorf("deletion event is required")
+	}
+	// Apply deletion requests to locally stored source events. The signed kind-5
+	// event is retained below as durable deletion evidence so clients and relay
+	// synchronization can verify that the source was intentionally removed.
+	for _, tag := range event.Tags {
+		if len(tag) < 2 || tag[0] != "e" {
+			continue
+		}
+		eventID := tag[1]
+		pubKey, err := extractPubKeyFromEventID(store, eventID)
+		if err != nil {
+			logging.Infof("Failed to extract public key for event %s: %v", eventID, err)
+			continue
+		}
+		if pubKey != event.PubKey {
+			logging.Infof("Public key mismatch for event %s, deletion request ignored", eventID)
+			continue
+		}
+		if err := store.DeleteEvent(eventID); err != nil {
+			return fmt.Errorf("failed to delete event %s: %w", eventID, err)
+		}
+	}
+
+	if err := store.StoreEvent(event); err != nil {
+		return fmt.Errorf("failed to preserve deletion event: %w", err)
+	}
+	return nil
 }
 
 func extractPubKeyFromEventID(store stores.Store, eventID string) (string, error) {
