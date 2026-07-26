@@ -5,8 +5,8 @@ go 1.24.0
 toolchain go1.24.1
 
 require (
-	github.com/HORNET-Storage/Scionic-Merkle-Tree/v2 v2.2.6
-	github.com/HORNET-Storage/hdk-nostr-go v1.1.4
+	github.com/HORNET-Storage/Scionic-Merkle-Tree/v2 v2.3.6
+	github.com/HORNET-Storage/hdk-nostr-go v1.1.5
 	github.com/dgraph-io/badger/v4 v4.8.0
 	github.com/fsnotify/fsnotify v1.7.0
 	github.com/fxamacker/cbor/v2 v2.9.0
