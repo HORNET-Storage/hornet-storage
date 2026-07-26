@@ -10,6 +10,7 @@ import (
 
 	merkle_dag "github.com/HORNET-Storage/Scionic-Merkle-Tree/v2/dag"
 	types "github.com/HORNET-Storage/hornet-storage/lib"
+	"github.com/HORNET-Storage/hornet-storage/lib/handlers/scionic/transfer"
 	stores "github.com/HORNET-Storage/hornet-storage/lib/stores"
 
 	lib_types "github.com/HORNET-Storage/hdk-nostr-go/lib"
@@ -106,14 +107,12 @@ func handleStreamingDownload(store stores.Store, stream lib_types.Stream, messag
 		lib_stream.WriteErrorToStream(stream, "Failed to create dag store", err)
 		return
 	}
-
 	if !dagStore.HasIndex() {
 		if err := dagStore.BuildIndex(); err != nil {
 			lib_stream.WriteErrorToStream(stream, "Failed to build index", err)
 			return
 		}
 	}
-
 	totalLeaves, err := dagStore.CountLeavesStreaming()
 	if err != nil {
 		lib_stream.WriteErrorToStream(stream, "Failed to count leaves", err)
@@ -121,23 +120,27 @@ func handleStreamingDownload(store stores.Store, stream lib_types.Stream, messag
 	}
 
 	const batchSize = 10
+	totalPackets := (totalLeaves + batchSize - 1) / batchSize
+	sender, err := transfer.NewSender(stream.Context(), stream, totalPackets)
+	if err != nil {
+		lib_stream.WriteErrorToStream(stream, "Failed to initialize DAG transfer", err)
+		return
+	}
+	defer sender.Close()
 	var batch []*merkle_dag.TransmissionPacket
 	packetIndex := 0
 	leafIndex := 0
-
 	parentCache := make(map[string]*merkle_dag.DagLeaf)
 
 	err = dagStore.IterateDagWithIndex(func(leafHash string, parentHash string) error {
 		leafIndex++
-
 		leaf, err := dagStore.RetrieveLeafWithoutContent(leafHash)
 		if err != nil {
 			return err
 		}
 		if leaf == nil {
-			return nil
+			return fmt.Errorf("indexed leaf %s is missing", leafHash)
 		}
-
 		if includeContent && len(leaf.ContentHash) > 0 {
 			rootCID, err := cid.Decode(message.Root)
 			if err != nil {
@@ -145,10 +148,9 @@ func handleStreamingDownload(store stores.Store, stream lib_types.Stream, messag
 			}
 			content, err := store.RetrieveContent(rootCID, leaf.ContentHash)
 			if err != nil {
-				fmt.Printf("Warning: Could not retrieve content for leaf %s: %v\n", leaf.Hash, err)
-			} else {
-				leaf.Content = content
+				return fmt.Errorf("failed to retrieve content for leaf %s: %w", leaf.Hash, err)
 			}
+			leaf.Content = content
 		}
 
 		proofs := make(map[string]*merkle_dag.ClassicTreeBranch)
@@ -167,73 +169,47 @@ func handleStreamingDownload(store stores.Store, stream lib_types.Stream, messag
 				}
 			}
 		}
-
-		packet := &merkle_dag.TransmissionPacket{
-			Leaf:       leaf,
-			ParentHash: parentHash,
-			Proofs:     proofs,
-		}
-
-		batch = append(batch, packet)
-
+		batch = append(batch, &merkle_dag.TransmissionPacket{Leaf: leaf, ParentHash: parentHash, Proofs: proofs})
 		if len(batch) >= batchSize || leafIndex == totalLeaves {
-			if err := sendBatch(stream, batch, message.Root, rootData.PublicKey, rootData.Signature, packetIndex, leafIndex == totalLeaves); err != nil {
+			if err := sendBatch(sender, batch, message.Root, rootData.PublicKey, rootData.Signature, packetIndex, totalPackets); err != nil {
 				return err
 			}
 			batch = batch[:0]
 			parentCache = make(map[string]*merkle_dag.DagLeaf)
 			packetIndex++
 		}
-
 		return nil
 	})
-
 	if err != nil {
 		lib_stream.WriteErrorToStream(stream, "Failed to stream DAG leaves", err)
+		return
+	}
+	if _, err := sender.Finish(); err != nil {
+		lib_stream.WriteErrorToStream(stream, "Failed to finish DAG transfer", err)
 	}
 }
 
-func sendBatch(stream lib_types.Stream, batch []*merkle_dag.TransmissionPacket, root string, publicKey string, signature string, packetIndex int, isFinal bool) error {
+func sendBatch(sender *transfer.Sender, batch []*merkle_dag.TransmissionPacket, root string, publicKey string, signature string, packetIndex int, totalPackets int) error {
 	batchedPacket := &merkle_dag.BatchedTransmissionPacket{
 		Leaves:        make([]*merkle_dag.DagLeaf, len(batch)),
 		Relationships: make(map[string]string),
+		PacketIndex:   packetIndex,
+		TotalPackets:  totalPackets,
 	}
-
-	for i, p := range batch {
-		batchedPacket.Leaves[i] = p.Leaf
-		// Always add to relationships - root has empty parent hash
-		batchedPacket.Relationships[p.Leaf.Hash] = p.ParentHash
+	for index, packet := range batch {
+		batchedPacket.Leaves[index] = packet.Leaf
+		batchedPacket.Relationships[packet.Leaf.Hash] = packet.ParentHash
 	}
-
-	uploadMsg := lib_types.UploadMessage{
+	uploadMessage := lib_types.UploadMessage{
 		Root:          root,
 		Packet:        *batchedPacket.ToSerializable(),
-		IsFinalPacket: isFinal,
+		IsFinalPacket: packetIndex == totalPackets-1,
 	}
-
 	if packetIndex == 0 {
-		uploadMsg.PublicKey = publicKey
-		uploadMsg.Signature = signature
+		uploadMessage.PublicKey = publicKey
+		uploadMessage.Signature = signature
 	}
-
-	if err := lib_stream.WriteMessageToStream(stream, uploadMsg); err != nil {
-		return err
-	}
-
-	resp, err := lib_stream.WaitForResponse(stream)
-	if err != nil {
-		// On final packet, client may disconnect before sending ack - this is fine
-		if isFinal {
-			return nil
-		}
-		return err
-	}
-
-	if !resp.Ok {
-		return lib_stream.WriteErrorToStream(stream, "Client rejected packet", nil)
-	}
-
-	return nil
+	return sender.Send(uploadMessage, batchedPacket)
 }
 
 func handlePartialDownload(store stores.Store, stream lib_types.Stream, message *lib_types.DownloadMessage, includeContent bool, rootData *types.DagLeafData) {
@@ -270,41 +246,28 @@ func handlePartialDownload(store stores.Store, stream lib_types.Stream, message 
 
 func sendDagPackets(stream lib_types.Stream, dagData *types.DagData) {
 	sequence := dagData.Dag.GetBatchedLeafSequence()
-	total := len(sequence)
-
-	for i, packet := range sequence {
-		isFinalPacket := i == total-1
-
-		uploadMsg := lib_types.UploadMessage{
+	sender, err := transfer.NewSender(stream.Context(), stream, len(sequence))
+	if err != nil {
+		lib_stream.WriteErrorToStream(stream, "Failed to initialize DAG transfer", err)
+		return
+	}
+	defer sender.Close()
+	for index, packet := range sequence {
+		uploadMessage := lib_types.UploadMessage{
 			Root:          dagData.Dag.Root,
 			Packet:        *packet.ToSerializable(),
-			IsFinalPacket: isFinalPacket,
+			IsFinalPacket: index == len(sequence)-1,
 		}
-
-		if packet.GetRootLeaf() != nil {
-			uploadMsg.PublicKey = dagData.PublicKey
-			uploadMsg.Signature = dagData.Signature
+		if index == 0 {
+			uploadMessage.PublicKey = dagData.PublicKey
+			uploadMessage.Signature = dagData.Signature
 		}
-
-		err := lib_stream.WriteMessageToStream(stream, uploadMsg)
-		if err != nil {
+		if err := sender.Send(uploadMessage, packet); err != nil {
 			lib_stream.WriteErrorToStream(stream, "Failed to send packet", err)
 			return
 		}
-
-		resp, err := lib_stream.WaitForResponse(stream)
-		if err != nil {
-			// On final packet, client may disconnect before sending ack - this is fine
-			if isFinalPacket {
-				return
-			}
-			lib_stream.WriteErrorToStream(stream, "Failed to receive acknowledgment", err)
-			return
-		}
-
-		if !resp.Ok {
-			lib_stream.WriteErrorToStream(stream, "Client rejected packet", nil)
-			return
-		}
+	}
+	if _, err := sender.Finish(); err != nil {
+		lib_stream.WriteErrorToStream(stream, "Failed to finish DAG transfer", err)
 	}
 }

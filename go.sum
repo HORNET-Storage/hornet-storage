@@ -8,10 +8,10 @@ dmitri.shuralyov.com/service/change v0.0.0-20181023043359-a85b471d5412/go.mod h1
 dmitri.shuralyov.com/state v0.0.0-20180228185332-28bcc343414c/go.mod h1:0PRwlb0D6DFvNNtx+9ybjezNCa8XF0xaYcETyp6rHWU=
 git.apache.org/thrift.git v0.0.0-20180902110319-2566ecd5d999/go.mod h1:fPE2ZNJGynbRyZ4dJvy6G277gSllfV2HJqblrnkyeyg=
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
-github.com/HORNET-Storage/Scionic-Merkle-Tree/v2 v2.3.6 h1:wyH/SXmr27RjPy+kqtIlccB9VPoG9ZYmNs+yecoiBV8=
-github.com/HORNET-Storage/Scionic-Merkle-Tree/v2 v2.3.6/go.mod h1:xstEFPKf0NjNqSe4BX8i9wWY0mtgQZskcZ2LR/9ID3E=
-github.com/HORNET-Storage/hdk-nostr-go v1.1.5 h1:oTYftZA9W/oQTosMvYtzAnEPUN4dj2zM1mxTy3i/kMU=
-github.com/HORNET-Storage/hdk-nostr-go v1.1.5/go.mod h1:JqMheY38lsA8JAvY6ji6L6BCO/SLLbyJqHk33unOfyE=
+github.com/HORNET-Storage/Scionic-Merkle-Tree/v2 v2.3.7 h1:fjGqXL3TyY95Zg9su5HEfswlisaqf6D6ST6uz4k/xcA=
+github.com/HORNET-Storage/Scionic-Merkle-Tree/v2 v2.3.7/go.mod h1:xstEFPKf0NjNqSe4BX8i9wWY0mtgQZskcZ2LR/9ID3E=
+github.com/HORNET-Storage/hdk-nostr-go v1.2.5 h1:uBD2iOnhAYqw0ZCAF0Jlx4JTzMqHSt31f1RRfTYl3Tk=
+github.com/HORNET-Storage/hdk-nostr-go v1.2.5/go.mod h1:Ao4EJ07YI8BCMhLGhXSK4wbslZM+z4Usv2lcHDz0g6M=
 github.com/aead/siphash v1.0.1/go.mod h1:Nywa3cDsYNNK3gaciGTWPwHt0wlpNV15vwmswBAUSII=
 github.com/alecthomas/template v0.0.0-20190718012654-fb15b899a751/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
 github.com/alecthomas/units v0.0.0-20201120081800-1786d5ef83d4/go.mod h1:OMCwj8VM1Kc9e19TLln2VL61YJF0x1XFtfdL4JdbSyE=

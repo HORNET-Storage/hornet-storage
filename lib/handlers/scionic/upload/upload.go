@@ -14,6 +14,7 @@ import (
 	"github.com/HORNET-Storage/hdk-nostr-go/lib/signing"
 	types "github.com/HORNET-Storage/hornet-storage/lib"
 	utils "github.com/HORNET-Storage/hornet-storage/lib/handlers/scionic"
+	"github.com/HORNET-Storage/hornet-storage/lib/handlers/scionic/transfer"
 	"github.com/HORNET-Storage/hornet-storage/lib/logging"
 	stores "github.com/HORNET-Storage/hornet-storage/lib/stores"
 	badgerhold_store "github.com/HORNET-Storage/hornet-storage/lib/stores/badgerhold"
@@ -35,8 +36,9 @@ func AddUploadHandler(listener *hsListener.HyperswarmListener, store stores.Stor
 	wrapper := func(stream lib_types.Stream) {
 		defer stream.Close()
 
+		messageReader := lib_stream.NewMessageReader(stream)
 		read := func() (*lib_types.UploadMessage, error) {
-			return lib_stream.WaitForUploadMessage(stream)
+			return lib_stream.WaitForUploadMessageFromReader(messageReader)
 		}
 
 		write := func(message interface{}) error {
@@ -134,101 +136,89 @@ func handleStreamingUpload(
 	canUploadDag func(rootLeaf *merkle_dag.DagLeaf, pubKey *string, signature *string) bool,
 	handleRecievedDag func(dag *merkle_dag.Dag, pubKey *string),
 ) {
-	dagStore := store.CreateDagStoreForRoot(message.Root, publicKey, signature)
+	root := message.Root
+	dagStore := store.CreateDagStoreForRoot(root, publicKey, signature)
+	completed := false
+	defer func() {
+		if !completed {
+			store.DeleteDag(root)
+		}
+	}()
 
 	var totalDagSize int64
 	leafCount := 0
 	packetCount := 0
-
-	// Track uploaded leaf hashes and referenced (linked) leaf hashes for partial DAG support
 	uploadedHashes := make(map[string]bool)
 	referencedHashes := make(map[string]bool)
+	receiveState := transfer.NewReceiverState(message.Root, message.PublicKey, message.Signature)
 
-	packet := merkle_dag.BatchedTransmissionPacketFromSerializable(&message.Packet)
-
-	if canUploadDag != nil {
-		rootLeaf := packet.GetRootLeaf()
-		if rootLeaf == nil {
-			write(utils.BuildErrorMessage("First packet must contain root leaf", nil))
+	for {
+		packet := merkle_dag.BatchedTransmissionPacketFromSerializable(&message.Packet)
+		if err := receiveState.Validate(message, packet); err != nil {
+			write(utils.BuildErrorMessage("Invalid transmission packet", err))
 			return
 		}
-		if !canUploadDag(rootLeaf, &message.PublicKey, &message.Signature) {
-			logging.Infof("[UPLOAD] DENIED root %s for pubkey %s", message.Root, message.PublicKey)
-			write(utils.BuildErrorMessage("Not allowed to upload this", nil))
+		if packetCount == 0 && canUploadDag != nil {
+			rootLeaf := packet.GetRootLeaf()
+			if rootLeaf == nil {
+				write(utils.BuildErrorMessage("First packet must contain root leaf", nil))
+				return
+			}
+			if !canUploadDag(rootLeaf, &message.PublicKey, &message.Signature) {
+				logging.Infof("[UPLOAD] DENIED root %s for pubkey %s", message.Root, message.PublicKey)
+				write(utils.BuildErrorMessage("Not allowed to upload this", nil))
+				return
+			}
+		}
+		if err := processPacketStreamingWithTracking(dagStore, packet, &totalDagSize, &leafCount, uploadedHashes, referencedHashes, write); err != nil {
 			return
 		}
-	}
+		receiveState.Commit(message, packet)
+		packetCount++
 
-	packetCount++
-	if err := processPacketStreamingWithTracking(dagStore, packet, &totalDagSize, &leafCount, uploadedHashes, referencedHashes, write); err != nil {
-		return
-	}
-
-	if !message.IsFinalPacket {
-		if err := write(lib_stream.BuildResponseMessage(true)); err != nil {
+		if message.IsFinalPacket {
+			if receiveState.Windowed() && receiveState.Next() != receiveState.Total() {
+				write(utils.BuildErrorMessage("Incomplete packet stream", nil))
+				return
+			}
+			break
+		}
+		if err := write(lib_stream.BuildResponseMessage(true, receiveState.Acknowledgment())); err != nil {
 			write(utils.BuildErrorMessage("Failed to write response to stream", err))
 			return
 		}
-
-		for {
-			msg, err := read()
-			if err != nil {
-				store.DeleteDag(message.Root)
-				write(utils.BuildErrorMessage("Failed to recieve upload message in time", nil))
-				return
-			}
-
-			pkt := merkle_dag.BatchedTransmissionPacketFromSerializable(&msg.Packet)
-			packetCount++
-
-			if err := processPacketStreamingWithTracking(dagStore, pkt, &totalDagSize, &leafCount, uploadedHashes, referencedHashes, write); err != nil {
-				store.DeleteDag(message.Root)
-				return
-			}
-
-			if err := write(lib_stream.BuildResponseMessage(true)); err != nil {
-				write(utils.BuildErrorMessage("Failed to write response to stream", err))
-				break
-			}
-
-			if msg.IsFinalPacket {
-				break
-			}
+		nextMessage, err := read()
+		if err != nil {
+			write(utils.BuildErrorMessage("Failed to receive upload message in time", err))
+			return
 		}
+		message = nextMessage
 	}
 
-	// Handle partial DAG: check for referenced leaves that weren't uploaded
 	missingHashes := findMissingLeafHashes(uploadedHashes, referencedHashes)
 	if len(missingHashes) > 0 {
 		logging.Infof("Partial DAG detected for root %s: %d referenced leaves not in upload, checking global store", message.Root, len(missingHashes))
-
-		// Verify all missing leaves exist in global store
 		if err := handlePartialDagLeaves(store, missingHashes, write); err != nil {
-			store.DeleteDag(message.Root)
 			return
 		}
 	}
-
 	if err := dagStore.VerifyStreaming(); err != nil {
-		store.DeleteDag(message.Root)
 		write(utils.BuildErrorMessage("Failed to verify dag", err))
 		return
 	}
-
 	if err := store.CacheRelationshipsStreaming(dagStore); err != nil {
 		logging.Infof("Warning: Failed to cache relationships: %v", err)
 	}
-
 	if err := store.CacheLabelsStreaming(dagStore); err != nil {
 		logging.Infof("Warning: Failed to cache labels: %v", err)
 	}
-
 	badgerhold_store.GetAndResetSkippedLeafCount()
 
-	if err := write(lib_stream.BuildResponseMessage(true)); err != nil {
+	if err := write(lib_stream.BuildResponseMessage(true, receiveState.Acknowledgment())); err != nil {
 		write(utils.BuildErrorMessage("Failed to write final response to stream", err))
 		return
 	}
+	completed = true
 
 	go func(pubKey string, size int64) {
 		subManager := subscription.GetGlobalManager()
@@ -237,15 +227,14 @@ func handleStreamingUpload(
 				logging.Infof("Warning: Failed to update storage usage for pubkey %s: %v\n", pubKey, err)
 			}
 		}
-	}(message.PublicKey, totalDagSize)
+	}(publicKey, totalDagSize)
 
 	if handleRecievedDag != nil {
-		dagData, err := store.BuildDagFromStore(message.Root, false)
+		dagData, err := store.BuildDagFromStore(root, false)
 		if err == nil {
-			handleRecievedDag(&dagData.Dag, &message.PublicKey)
+			handleRecievedDag(&dagData.Dag, &publicKey)
 		}
 	}
-
 	if len(missingHashes) > 0 {
 		logging.Infof("Streaming upload complete (partial DAG): %d uploaded leaves + %d existing leaves, %d bytes", leafCount, len(missingHashes), totalDagSize)
 	} else {
