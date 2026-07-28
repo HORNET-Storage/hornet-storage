@@ -120,7 +120,7 @@ func BuildServer(store stores.Store) *fiber.App {
 	// Start the async notification processor before accepting connections.
 	// Events are queued via notifyListeners() and fan-out happens on a
 	// dedicated goroutine, so websocket handlers are never blocked.
-	StartNotificationProcessor()
+	StartNotificationProcessor(store)
 
 	app := fiber.New()
 
@@ -332,6 +332,23 @@ func handleRelayInfoRequests(c *fiber.Ctx) error {
 	return c.Next()
 }
 
+func advertisedNIPs() []int {
+	configured := viper.GetIntSlice("relay.supported_nips")
+	notificationStoreMu.RLock()
+	store := notificationStore
+	notificationStoreMu.RUnlock()
+	if store != nil && store.SearchReady() {
+		return configured
+	}
+	advertised := make([]int, 0, len(configured))
+	for _, nip := range configured {
+		if nip != 50 {
+			advertised = append(advertised, nip)
+		}
+	}
+	return advertised
+}
+
 func GetRelayInfo() NIP11RelayInfo {
 	// Format contact as "email | npub"
 	var contact string
@@ -368,7 +385,7 @@ func GetRelayInfo() NIP11RelayInfo {
 		WriteAccess:   writeAccess,
 		Contact:       contact,
 		Icon:          viper.GetString("relay.icon"),
-		SupportedNIPs: viper.GetIntSlice("relay.supported_nips"),
+		SupportedNIPs: advertisedNIPs(),
 		Software:      viper.GetString("relay.software"),
 		Version:       viper.GetString("relay.version"),
 		BasePort:      basePort, // Clients use this + offsets to find services

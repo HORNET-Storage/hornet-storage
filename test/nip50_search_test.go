@@ -2,6 +2,8 @@ package test
 
 import (
 	"encoding/json"
+	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -13,174 +15,129 @@ import (
 )
 
 func TestNIP50SearchFunctionality(t *testing.T) {
-	// Initialize test store with a fresh temp directory
-	store, err := badgerhold.InitStore(t.TempDir())
+	basePath := t.TempDir()
+	storePath := filepath.Join(basePath, "events")
+	statsPath := filepath.Join(basePath, "stats.db")
+	store, err := badgerhold.InitStore(storePath, statsPath)
 	require.NoError(t, err)
-	defer store.Cleanup()
+	waitForSearchReady(t, store)
 
-	// Create test events with proper 64-char hex IDs (as per Nostr spec)
-	testID1 := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0001"
-	testID2 := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0002"
-	testID3 := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0003"
-
-	now := time.Now()
+	now := nostr.Timestamp(time.Now().Unix())
 	events := []*nostr.Event{
-		{
-			ID:        testID1,
-			PubKey:    "pubkey1",
-			CreatedAt: nostr.Timestamp(now.Unix()),
-			Kind:      1,
-			Content:   "This is a test about bitcoin and nostr",
-			Tags:      nostr.Tags{},
-		},
-		{
-			ID:        testID2,
-			PubKey:    "pubkey2",
-			CreatedAt: nostr.Timestamp(now.Unix() - 60),
-			Kind:      1,
-			Content:   "Spam content that should be filtered",
-			Tags:      nostr.Tags{},
-		},
-		{
-			ID:        testID3,
-			PubKey:    "pubkey3",
-			CreatedAt: nostr.Timestamp(now.Unix() - 120),
-			Kind:      1,
-			Content:   "Another test about nostr protocol",
-			Tags:      nostr.Tags{},
-		},
+		newSearchEvent(1, 1, now, "The Bitcoin protocol uses a peer to peer network", nostr.Tags{{"topic", "money"}}),
+		newSearchEvent(2, 1, now-1, "Nostr clients discover relays", nostr.Tags{{"topic", "social"}}),
+		newSearchEvent(3, 1, now-2, "A café publishes Unicode notes", nostr.Tags{{"topic", "social"}}),
+		newSearchEvent(4, 7, now-3, "bitcoin reaction", nil),
 	}
-
-	// Store events
 	for _, event := range events {
-		err := store.StoreEvent(event)
-		require.NoError(t, err)
+		require.NoError(t, store.StoreEvent(event))
 	}
 
-	// Mark test2 as blocked (spam)
-	err = store.MarkEventBlocked(testID2, now.Unix())
+	t.Run("prefix terms and structured filters", func(t *testing.T) {
+		results, err := store.SearchEvents(nostr.Filter{
+			Search:  "bit prot",
+			Kinds:   []int{1},
+			Authors: []string{events[0].PubKey[:16]},
+			Tags:    nostr.TagMap{"topic": []string{"money"}},
+		}, 0, 10)
+		require.NoError(t, err)
+		require.Len(t, results, 1)
+		assert.Equal(t, events[0].ID, results[0].ID)
+	})
+
+	t.Run("quoted phrase", func(t *testing.T) {
+		results, err := store.QueryEvents(nostr.Filter{Search: `"peer to peer"`})
+		require.NoError(t, err)
+		require.Len(t, results, 1)
+		assert.Equal(t, events[0].ID, results[0].ID)
+	})
+
+	t.Run("unicode normalization", func(t *testing.T) {
+		results, err := store.QueryEvents(nostr.Filter{Search: "CAFE\u0301"})
+		require.NoError(t, err)
+		require.Len(t, results, 1)
+		assert.Equal(t, events[2].ID, results[0].ID)
+	})
+
+	t.Run("delete removes indexed document", func(t *testing.T) {
+		require.NoError(t, store.DeleteEvent(events[1].ID))
+		results, err := store.QueryEvents(nostr.Filter{Search: "nostr"})
+		require.NoError(t, err)
+		assert.Empty(t, results)
+	})
+
+	require.NoError(t, store.Cleanup())
+	reopened, err := badgerhold.InitStore(storePath, statsPath)
 	require.NoError(t, err)
-
-	// Test 1: Basic search without extensions
-	t.Run("BasicSearch", func(t *testing.T) {
-		filter := nostr.Filter{
-			Search: "nostr",
-		}
-
-		results, err := store.QueryEvents(filter)
-		require.NoError(t, err)
-
-		// Should return test1 and test3 but not test2 (blocked)
-		assert.Len(t, results, 2)
-
-		foundIDs := make(map[string]bool)
-		for _, event := range results {
-			foundIDs[event.ID] = true
-		}
-
-		assert.True(t, foundIDs[testID1])
-		assert.True(t, foundIDs[testID3])
-		assert.False(t, foundIDs[testID2])
-	})
-
-	// Test 2: Search with extensions parsing (testing the parser works)
-	t.Run("SearchWithExtensions", func(t *testing.T) {
-		// Test that we can parse search queries with extensions
-		testQuery := "bitcoin include:spam lang:en"
-		searchQuery := search.ParseSearchQuery(testQuery)
-
-		assert.Equal(t, "bitcoin", searchQuery.Text)
-		assert.True(t, searchQuery.IsSpamIncluded())
-		assert.Equal(t, "en", searchQuery.Extensions["lang"])
-
-		// Verify basic search still works
-		filter := nostr.Filter{
-			Search: "nostr",
-		}
-
-		results, err := store.QueryEvents(filter)
-		require.NoError(t, err)
-
-		// Should return events that match "nostr" (test1 and test3, but not test2 which is blocked)
-		assert.Len(t, results, 2)
-	})
-
-	// Test 3: Test search query parser
-	t.Run("SearchQueryParser", func(t *testing.T) {
-		testCases := []struct {
-			input              string
-			expectedText       string
-			expectedExtensions map[string]string
-		}{
-			{
-				input:              "bitcoin price include:spam",
-				expectedText:       "bitcoin price",
-				expectedExtensions: map[string]string{"include": "spam"},
-			},
-			{
-				input:              "nostr events lang:en include:spam",
-				expectedText:       "nostr events",
-				expectedExtensions: map[string]string{"lang": "en", "include": "spam"},
-			},
-			{
-				input:              "simple search",
-				expectedText:       "simple search",
-				expectedExtensions: map[string]string{},
-			},
-		}
-
-		for _, tc := range testCases {
-			query := search.ParseSearchQuery(tc.input)
-			assert.Equal(t, tc.expectedText, query.Text)
-			assert.Equal(t, tc.expectedExtensions, query.Extensions)
-		}
-	})
-
-	// Test 4: Search index functionality
-	t.Run("SearchIndexing", func(t *testing.T) {
-		// Test tokenization
-		tokens := badgerhold.TokenizeContent("This is a TEST of tokenization! With some #hashtags")
-		expectedTokens := []string{"this", "test", "tokenization", "with", "some", "hashtags"}
-
-		assert.Equal(t, expectedTokens, tokens)
-
-		// Test that events are properly indexed
-		searchTokens := []string{"bitcoin"}
-		indexedEvents, err := store.SearchEvents(searchTokens, 10)
-		require.NoError(t, err)
-
-		// Should find test1 which contains "bitcoin"
-		assert.Len(t, indexedEvents, 1)
-		assert.Equal(t, testID1, indexedEvents[0].ID)
-	})
+	defer reopened.Cleanup()
+	waitForSearchReady(t, reopened)
+	results, err := reopened.QueryEvents(nostr.Filter{Search: "bitcoin"})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, events[0].ID, results[0].ID)
 }
 
-func TestNIP50Compliance(t *testing.T) {
-	// Test that we properly handle NIP-50 compliant requests
-	t.Run("REQMessageWithSearch", func(t *testing.T) {
-		// Create a REQ message with search field
-		req := map[string]interface{}{
-			"subscription_id": "test-sub",
-			"filters": []map[string]interface{}{
-				{
-					"kinds":  []int{1},
-					"search": "bitcoin include:spam",
-					"limit":  10,
-				},
-			},
-		}
+func TestNIP50SearchRanksExactTermsAheadOfPrefixMatches(t *testing.T) {
+	basePath := t.TempDir()
+	store, err := badgerhold.InitStore(filepath.Join(basePath, "events"), filepath.Join(basePath, "stats.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Cleanup()) })
+	waitForSearchReady(t, store)
 
-		// Verify it can be marshaled/unmarshaled properly
-		data, err := json.Marshal(req)
-		require.NoError(t, err)
+	now := nostr.Timestamp(time.Now().Unix())
+	prefixOnly := newSearchEvent(20, 1, now+10, "bitcoincash network", nil)
+	exact := newSearchEvent(21, 1, now, "bitcoin network", nil)
+	require.NoError(t, store.StoreEvent(prefixOnly))
+	require.NoError(t, store.StoreEvent(exact))
 
-		var parsed map[string]interface{}
-		err = json.Unmarshal(data, &parsed)
-		require.NoError(t, err)
+	results, err := store.SearchEvents(nostr.Filter{Search: "bitcoin"}, 0, 1)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, exact.ID, results[0].ID, "an exact term should rank ahead of a newer prefix-only match")
+}
 
-		// Verify search field is preserved
-		filters := parsed["filters"].([]interface{})
-		filter := filters[0].(map[string]interface{})
-		assert.Equal(t, "bitcoin include:spam", filter["search"])
-	})
+func TestNIP50SearchQueryParser(t *testing.T) {
+	parsed := search.ParseSearchQuery(`bitcoin "peer network" include:spam lang:en`)
+	assert.Equal(t, `bitcoin "peer network"`, parsed.Text)
+	assert.True(t, parsed.IsSpamIncluded())
+	assert.Equal(t, "en", parsed.Extensions["lang"])
+	assert.Equal(t, "bitcoin", search.ParseSearchQuery(`bitcoin lang:en`).Text)
+	assert.True(t, search.MatchesText("Bitcoin has a peer network", parsed.Text))
+	assert.False(t, search.MatchesText("Bitcoin has a peer relay network", parsed.Text))
+}
+
+func TestNIP50RequestJSONPreservesSearch(t *testing.T) {
+	req := map[string]interface{}{
+		"subscription_id": "test-sub",
+		"filters": []map[string]interface{}{{
+			"kinds": []int{1}, "search": "bitcoin include:spam", "limit": 10,
+		}},
+	}
+	data, err := json.Marshal(req)
+	require.NoError(t, err)
+	var parsed map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &parsed))
+	filters := parsed["filters"].([]interface{})
+	filter := filters[0].(map[string]interface{})
+	assert.Equal(t, "bitcoin include:spam", filter["search"])
+}
+
+func waitForSearchReady(t *testing.T, store *badgerhold.BadgerholdStore) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !store.SearchReady() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	require.True(t, store.SearchReady(), "search index did not become ready")
+}
+
+func newSearchEvent(sequence, kind int, createdAt nostr.Timestamp, content string, tags nostr.Tags) *nostr.Event {
+	return &nostr.Event{
+		ID:        fmt.Sprintf("%064x", sequence),
+		PubKey:    fmt.Sprintf("%064x", sequence+100),
+		CreatedAt: createdAt,
+		Kind:      kind,
+		Content:   content,
+		Tags:      tags,
+	}
 }

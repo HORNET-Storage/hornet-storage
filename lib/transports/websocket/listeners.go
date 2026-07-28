@@ -6,10 +6,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sync"
-
 	"sync/atomic"
 
+	searchquery "github.com/HORNET-Storage/hornet-storage/lib/handlers/nostr/search"
+	eventvisibility "github.com/HORNET-Storage/hornet-storage/lib/handlers/nostr/visibility"
 	"github.com/HORNET-Storage/hornet-storage/lib/logging"
+	"github.com/HORNET-Storage/hornet-storage/lib/stores"
 	"github.com/gofiber/contrib/websocket"
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/puzpuzpuz/xsync/v3"
@@ -25,6 +27,13 @@ var connWriteMu = xsync.NewMapOf[*websocket.Conn, *sync.Mutex]()
 // Buffered channel for async event notifications.
 // Events are queued here by notifyListeners and processed by a dedicated goroutine.
 var notificationChan = make(chan nostr.Event, 1000)
+
+// notificationStore is the canonical source used to enforce the same relay visibility
+// policy for live fan-out as for historical REQ responses.
+var (
+	notificationStore   stores.Store
+	notificationStoreMu sync.RWMutex
+)
 
 // Global challenge variable
 var globalChallenge atomic.Value
@@ -44,7 +53,10 @@ func getConnWriteMutex(ws *websocket.Conn) *sync.Mutex {
 
 // StartNotificationProcessor starts the background goroutine that processes
 // event notifications asynchronously. Safe to call multiple times — only starts once.
-func StartNotificationProcessor() {
+func StartNotificationProcessor(store stores.Store) {
+	notificationStoreMu.Lock()
+	notificationStore = store
+	notificationStoreMu.Unlock()
 	notificationProcessorOnce.Do(func() {
 		go func() {
 			for {
@@ -71,27 +83,50 @@ func StartNotificationProcessor() {
 // processNotification handles the actual fan-out to all matching listeners.
 // Runs on the dedicated notification goroutine — never on the event handler path.
 func processNotification(event *nostr.Event) {
+	notificationStoreMu.RLock()
+	store := notificationStore
+	notificationStoreMu.RUnlock()
+	if store == nil {
+		return
+	}
+
+	blocked, pending := eventvisibility.LoadModerationStatus(store, []*nostr.Event{event})
+	accessControl := GetAccessControl()
 	listeners.Range(func(ws *websocket.Conn, conData ListenerData) bool {
 		if !conData.authenticated {
-			return true // Skip unauthenticated connections
+			return true // Preserve the relay's authenticated live-subscription policy.
 		}
+		policy := eventvisibility.NewPolicy(store, conData.pubkey, accessControl)
 		conData.subscriptions.Range(func(id string, listener *Subscription) bool {
-			if !listener.filters.Match(event) {
+			matched := false
+			for _, filter := range listener.filters {
+				if liveFilterMatches(event, filter, policy, blocked[event.ID], pending[event.ID]) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
 				return true
 			}
 			mu := getConnWriteMutex(ws)
 			mu.Lock()
 			err := ws.WriteJSON(nostr.EventEnvelope{SubscriptionID: &id, Event: *event})
 			mu.Unlock()
-			if err != nil {
-				if !isConnectionClosedError(err) {
-					logging.Infof("Error notifying listener: %v", err)
-				}
+			if err != nil && !isConnectionClosedError(err) {
+				logging.Infof("Error notifying listener: %v", err)
 			}
 			return true
 		})
 		return true
 	})
+}
+
+func liveFilterMatches(event *nostr.Event, filter nostr.Filter, policy eventvisibility.Policy, blocked, pending bool) bool {
+	if !searchquery.EventMatchesFilter(event, filter) {
+		return false
+	}
+	parsedSearch := searchquery.ParseSearchQuery(filter.Search)
+	return policy.CanExpose(event, parsedSearch.IsSpamIncluded(), blocked, pending)
 }
 
 // notifyListeners queues an event for async notification to all matching listeners.
@@ -157,13 +192,14 @@ func GetListenerChallenge(ws *websocket.Conn) (*string, error) {
 	return &conData.challenge, nil
 }
 
-func AuthenticateConnection(ws *websocket.Conn) error {
+func AuthenticateConnection(ws *websocket.Conn, pubkey string) error {
 	conData, ok := listeners.Load(ws)
 	if !ok {
 		return fmt.Errorf("no listeners found for this WebSocket connection")
 	}
 
 	conData.authenticated = true
+	conData.pubkey = pubkey
 	listeners.Store(ws, conData)
 
 	return nil

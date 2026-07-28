@@ -52,6 +52,8 @@ type Store interface {
 
 	// Nostr
 	QueryEvents(filter nostr.Filter) ([]*nostr.Event, error)
+	SearchEvents(filter nostr.Filter, offset, limit int) ([]*nostr.Event, error)
+	SearchReady() bool
 	StoreEvent(event *nostr.Event) error
 	DeleteEvent(eventID string) error
 	QueryBlobs(mimeType string) ([]string, error)

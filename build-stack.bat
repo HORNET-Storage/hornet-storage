@@ -17,12 +17,15 @@ for %%P in ("%AIRLOCK_ROOT%" "%SIDECAR_ROOT%" "%PANEL_ROOT%" "%SUITE_ROOT%\nosis
 if exist "%OUT%" rmdir /s /q "%OUT%"
 mkdir "%OUT%\bin" "%OUT%\relay\web" "%OUT%\airlock" || exit /b 1
 
+set "CGO_ENABLED=1"
 pushd "%RELAY_ROOT%"
 go build -buildvcs=false -trimpath -o "%OUT%\bin\hornets-relay.exe" .\services\server\port || exit /b 1
 popd
+set "CGO_ENABLED=1"
 pushd "%AIRLOCK_ROOT%"
 go build -buildvcs=false -trimpath -o "%OUT%\bin\airlock.exe" . || exit /b 1
 popd
+set "CGO_ENABLED="
 pushd "%SIDECAR_ROOT%"
 if exist package-lock.json (
   call npx --yes npm@11.10.0 ci

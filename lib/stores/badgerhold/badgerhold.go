@@ -41,6 +41,9 @@ type BadgerholdStore struct {
 
 	StatsDatabase statistics.StatisticsStore
 
+	searchIndex *bleveSearchIndex
+	searchKinds map[int]struct{}
+
 	gcSignal chan struct{} // Non-blocking signal from write paths to trigger extra GC cycle
 
 	closed bool
@@ -136,6 +139,12 @@ func InitStore(basepath string, args ...interface{}) (*BadgerholdStore, error) {
 		return nil, fmt.Errorf("failed to initialize gorm statistics database: %v", err)
 	}
 
+	// Bleve is a derived NIP-50 index. Failure to initialize it must not make
+	// canonical event storage unavailable; readiness controls NIP-50 advertisement.
+	if err := store.initializeSearchIndex(); err != nil {
+		logging.Infof("NIP-50 search initialization failed; search will remain unavailable: %v", err)
+	}
+
 	// Run aggressive GC on startup to clean garbage from previous run.
 	// This prevents the delay before the first periodic GC cycle that was causing
 	// 100GB+ garbage accumulation after restarts.
@@ -170,6 +179,8 @@ func (store *BadgerholdStore) Cleanup() error {
 
 	var result error
 
+	// Close the derived index before its canonical Badger source.
+	result = multierr.Append(result, store.closeSearchIndex())
 	result = multierr.Append(result, store.Database.Close())
 	result = multierr.Append(result, store.StatsDatabase.Close())
 

@@ -1,6 +1,7 @@
 package badgerhold
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 
 	"github.com/HORNET-Storage/hornet-storage/lib/config"
+	searchquery "github.com/HORNET-Storage/hornet-storage/lib/handlers/nostr/search"
 	"github.com/HORNET-Storage/hornet-storage/lib/logging"
 	"github.com/HORNET-Storage/hornet-storage/lib/transports/websocket"
 )
@@ -166,7 +168,10 @@ func (store *BadgerholdStore) StoreEvent(ev *nostr.Event) error {
 		return fmt.Errorf("failed to encode event: %w", err)
 	}
 
-	// Single transaction: event data + all index keys
+	// Serialize the authoritative transaction and derived-index mutation with the
+	// rebuild's final journal replay. The Badger transaction remains canonical; if
+	// Bleve is unavailable, the durable journal entry is retained for recovery.
+	unlockSearchMutation := store.beginSearchMutation(ev)
 	err = store.Database.Badger().Update(func(tx *badger.Txn) error {
 		if err := tx.Set(eventKey(ev.ID), val); err != nil {
 			return err
@@ -188,11 +193,19 @@ func (store *BadgerholdStore) StoreEvent(ev *nostr.Event) error {
 				return err
 			}
 		}
+		if err := store.queueSearchMutation(tx, ev, searchMutationUpsert); err != nil {
+			return err
+		}
 		return nil
 	})
 	if err != nil {
+		unlockSearchMutation()
 		return err
 	}
+	if err := store.applySearchMutationLocked(ev.ID, false); err != nil && !errors.Is(err, ErrSearchUnavailable) {
+		logging.Infof("Failed to update search index for event %s: %v\n", ev.ID, err)
+	}
+	unlockSearchMutation()
 
 	// ── post-write bookkeeping (non-DB) ──
 	eventsStoredCount.Add(1)
@@ -201,10 +214,6 @@ func (store *BadgerholdStore) StoreEvent(ev *nostr.Event) error {
 		if err := store.StatsDatabase.SaveEventKind(ev); err != nil {
 			logging.Infof("Failed to record event statistics: %v\n", err)
 		}
-	}
-
-	if err := store.UpdateSearchIndex(ev); err != nil {
-		logging.Infof("Failed to update search index for event %s: %v\n", ev.ID, err)
 	}
 
 	// Image moderation check
@@ -250,7 +259,11 @@ func (store *BadgerholdStore) DeleteEvent(eventID string) error {
 
 	ts := int64(ev.CreatedAt)
 
+	unlockSearchMutation := store.beginSearchMutation(ev)
 	err = store.Database.Badger().Update(func(tx *badger.Txn) error {
+		if err := store.queueSearchMutation(tx, ev, searchMutationDelete); err != nil {
+			return err
+		}
 		if err := tx.Delete(eventKey(eventID)); err != nil {
 			return err
 		}
@@ -267,8 +280,13 @@ func (store *BadgerholdStore) DeleteEvent(eventID string) error {
 		return nil
 	})
 	if err != nil {
+		unlockSearchMutation()
 		return fmt.Errorf("failed to delete event and indexes: %w", err)
 	}
+	if err := store.applySearchMutationLocked(eventID, false); err != nil && !errors.Is(err, ErrSearchUnavailable) {
+		logging.Infof("Failed to remove event %s from search index: %v\n", eventID, err)
+	}
+	unlockSearchMutation()
 
 	eventsDeletedCount.Add(1)
 
@@ -276,9 +294,6 @@ func (store *BadgerholdStore) DeleteEvent(eventID string) error {
 		if err := store.StatsDatabase.DeleteEventByID(eventID); err != nil {
 			logging.Infof("Failed to delete event from statistics: %v\n", err)
 		}
-	}
-	if err := store.RemoveFromSearchIndex(eventID); err != nil {
-		logging.Infof("Failed to remove event %s from search index: %v\n", eventID, err)
 	}
 
 	return nil
@@ -292,6 +307,9 @@ func (store *BadgerholdStore) QueryEvents(filter nostr.Filter) ([]*nostr.Event, 
 	}
 
 	limit := filter.Limit
+	if filter.Search != "" {
+		return store.SearchEvents(filter, 0, limit)
+	}
 	if limit <= 0 {
 		limit = defaultMaxLimit
 	}
@@ -481,48 +499,7 @@ func collectFromPrefixes(tx *badger.Txn, prefixes [][]byte, filter nostr.Filter,
 // ──────── filter matching ────────
 
 func matchesFilter(ev *nostr.Event, f nostr.Filter) bool {
-	if len(f.IDs) > 0 && !containsStr(f.IDs, ev.ID) {
-		return false
-	}
-	if len(f.Kinds) > 0 && !containsInt(f.Kinds, ev.Kind) {
-		return false
-	}
-	if len(f.Authors) > 0 && !containsStr(f.Authors, ev.PubKey) {
-		return false
-	}
-	if f.Since != nil && int64(ev.CreatedAt) < int64(*f.Since) {
-		return false
-	}
-	if f.Until != nil && int64(ev.CreatedAt) > int64(*f.Until) {
-		return false
-	}
-	// Tags – AND across tag names, OR within values
-	for tagKey, wantValues := range f.Tags {
-		name := strings.TrimPrefix(tagKey, "#")
-		found := false
-		for _, tag := range ev.Tags {
-			if len(tag) >= 2 && tag[0] == name {
-				for _, wv := range wantValues {
-					if tag[1] == wv {
-						found = true
-						break
-					}
-				}
-			}
-			if found {
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-	}
-	if f.Search != "" {
-		if !strings.Contains(strings.ToLower(ev.Content), strings.ToLower(f.Search)) {
-			return false
-		}
-	}
-	return true
+	return searchquery.EventMatchesFilter(ev, f)
 }
 
 // ──────── sort helper ────────
@@ -531,26 +508,6 @@ func sortEventsByCreatedAtDesc(events []*nostr.Event) {
 	sort.Slice(events, func(i, j int) bool {
 		return events[i].CreatedAt > events[j].CreatedAt
 	})
-}
-
-// ──────── small utilities ────────
-
-func containsStr(ss []string, s string) bool {
-	for _, x := range ss {
-		if x == s {
-			return true
-		}
-	}
-	return false
-}
-
-func containsInt(ii []int, v int) bool {
-	for _, x := range ii {
-		if x == v {
-			return true
-		}
-	}
-	return false
 }
 
 // ──────── schema version ────────

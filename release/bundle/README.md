@@ -27,6 +27,7 @@ Keep the launcher open. It supervises the relay and Airlock and stops the other 
 - Fresh operator setup uses `allowed_users.mode: public` with read/write admission set to `all_users`, and leaves UPnP off. Repository permission events, private-repository isolation, Airlock authorization, signatures, bundles, and DAG verification remain separate enforcement layers.
 - The version-matched relay panel is served from `relay/web`.
 - Generated configs and runtime data stay under `relay/` and `airlock/`; custom relay data and repository paths can be selected during setup.
+- NIP-50 search is embedded in the relay. Badger remains authoritative and the derived Bleve index is rebuilt automatically when missing or incompatible; there is no additional process, service, or port to configure.
 
 Explicit `sidecar.executable`, `HORNETS_SIDECAR_EXECUTABLE`, Airlock's top-level `private_key`, `AIRLOCK_PRIVATE_KEY`, and the server/launcher-owned `AIRLOCK_CONFIG_PATH` remain supported for custom layouts. The Airlock config target is server-owned during operator setup, so a browser payload cannot redirect protected configuration writes.
 

@@ -49,6 +49,10 @@ jobs:
             asset: macos-amd64
             executable_suffix: ""
             archive: tar
+          - os: macos-15
+            asset: macos-arm64
+            executable_suffix: ""
+            archive: tar
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -92,7 +96,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: 1.24.1
+          go-version: 1.25.12
           cache-dependency-path: |
             sources/hornets-nostr-relay/go.sum
             sources/airlock/go.sum
@@ -132,13 +136,12 @@ jobs:
       - name: Build relay and Airlock
         shell: bash
         env:
-          CGO_ENABLED: "1"
           EXE: ${{ matrix.executable_suffix }}
         run: |
           set -euo pipefail
           mkdir -p build/bin
-          (cd sources/hornets-nostr-relay && go build -trimpath -o "../../build/bin/hornets-relay${EXE}" ./services/server/port)
-          (cd sources/airlock && go build -trimpath -o "../../build/bin/airlock${EXE}" .)
+          (cd sources/hornets-nostr-relay && CGO_ENABLED=1 go build -buildvcs=false -trimpath -o "../../build/bin/hornets-relay${EXE}" ./services/server/port)
+          (cd sources/airlock && CGO_ENABLED=1 go build -buildvcs=false -trimpath -o "../../build/bin/airlock${EXE}" .)
           cp "sources/hornets-hyperswarm/dist/hornets-hyperswarm${EXE}" "build/bin/hornets-hyperswarm${EXE}"
           cp -R sources/hornets-hyperswarm/dist/prebuilds build/bin/prebuilds
 

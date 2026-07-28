@@ -90,6 +90,8 @@ type TextFilterConfig struct {
 	CacheSize           int   `mapstructure:"cache_size"`
 	CacheTTLSeconds     int   `mapstructure:"cache_ttl_seconds"`
 	FullTextSearchKinds []int `mapstructure:"full_text_search_kinds"`
+	SearchPageSize      int   `mapstructure:"search_page_size"`
+	MaxSearchCandidates int   `mapstructure:"max_search_candidates"`
 }
 
 // ImageModerationConfig holds image moderation configuration

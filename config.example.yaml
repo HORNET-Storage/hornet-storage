@@ -37,8 +37,14 @@ content_filtering:
         cache_size: 10000
         cache_ttl_seconds: 60
         enabled: true
+        # Kinds whose content is indexed by the embedded NIP-50 Bleve index.
         full_text_search_kinds:
             - 1
+            - 31415
+            - 39504
+        # Candidate paging keeps ACL/moderation filtering outside the index trustworthy.
+        search_page_size: 128
+        max_search_candidates: 5000
 event_filtering:
     allow_unregistered_kinds: false
     dynamic_kinds:

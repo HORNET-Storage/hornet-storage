@@ -17,7 +17,7 @@ RUN corepack enable \
     && yarn install --frozen-lockfile \
     && yarn build
 
-FROM golang:1.24-bookworm AS go-builder
+FROM golang:1.25-bookworm AS go-builder
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential git \

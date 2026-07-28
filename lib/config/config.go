@@ -986,7 +986,9 @@ func setDefaults() {
 	viper.SetDefault("content_filtering.text_filter.enabled", true)
 	viper.SetDefault("content_filtering.text_filter.cache_size", 10000)
 	viper.SetDefault("content_filtering.text_filter.cache_ttl_seconds", 60)
-	viper.SetDefault("content_filtering.text_filter.full_text_search_kinds", []int{1})
+	viper.SetDefault("content_filtering.text_filter.full_text_search_kinds", []int{1, 31415, 39504})
+	viper.SetDefault("content_filtering.text_filter.search_page_size", 128)
+	viper.SetDefault("content_filtering.text_filter.max_search_candidates", 5000)
 
 	viper.SetDefault("content_filtering.image_moderation.enabled", true)
 	viper.SetDefault("content_filtering.image_moderation.mode", "full")
@@ -1259,6 +1261,8 @@ func GetAllSettingsAsMap() (map[string]interface{}, error) {
 			"cache_size":             cfg.ContentFiltering.TextFilter.CacheSize,
 			"cache_ttl_seconds":      cfg.ContentFiltering.TextFilter.CacheTTLSeconds,
 			"full_text_search_kinds": cfg.ContentFiltering.TextFilter.FullTextSearchKinds,
+			"search_page_size":       cfg.ContentFiltering.TextFilter.SearchPageSize,
+			"max_search_candidates":  cfg.ContentFiltering.TextFilter.MaxSearchCandidates,
 		},
 		"image_moderation": map[string]interface{}{
 			"enabled":                cfg.ContentFiltering.ImageModeration.Enabled,

@@ -110,7 +110,9 @@ On Windows use `docker\build.bat`, then `docker compose up -d`. Persistent relay
 
 ## Build the complete stack from source
 
-Requirements: Go 1.24+, a C compiler for CGO, Git, Node.js 22+, npm 11.10+, Corepack, and Yarn Classic. Keep Airlock, Nosis CLI, hyperswarm, and the relay panel as sibling repositories because the development build uses the local checked-out sources.
+Requirements: Go 1.25+, Git, Node.js 22+, npm 11.10+, Corepack, Yarn Classic, and a C compiler for the relay and Airlock CGO builds. The relay keeps CGO enabled because its existing statistics store uses SQLite; Bleve remains embedded and does not add another native runtime service. Keep Airlock, Nosis CLI, hyperswarm, and the relay panel as sibling repositories because the development build uses the local checked-out sources.
+
+Badger remains the authoritative event database. NIP-50 uses an embedded, derived Bleve index beside the configured Badger path; it adds no service, port, or separately managed process and is rebuilt automatically if it is missing, incompatible, or corrupt.
 
 Linux/macOS:
 
@@ -128,7 +130,7 @@ The development bundle is written to `dist/hornets-relay-dev` with the same layo
 
 ## Release workflow
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`. It checks out the matching component repositories, builds each binary and the relay panel natively on Linux x64, Windows x64, and macOS Intel, validates the complete runtime layout, and publishes ready-to-extract archives with SHA-256 checksum files. If sibling repositories are private, configure `HORNETS_REPO_TOKEN` with read access; public repositories can use the workflow token.
+Pushing a `v*` tag runs `.github/workflows/release.yml`. It checks out the matching component repositories, builds each binary and the relay panel natively on Linux x64, Windows x64, macOS Intel, and macOS Apple Silicon, validates the complete runtime layout, and publishes ready-to-extract archives with SHA-256 checksum files. If sibling repositories are private, configure `HORNETS_REPO_TOKEN` with read access; public repositories can use the workflow token.
 
 Manual workflow runs build and retain the archives without publishing a GitHub release. Component refs are explicit inputs so a release can pin reviewed Airlock, hyperswarm, Nosis CLI, and relay-panel revisions.
 
