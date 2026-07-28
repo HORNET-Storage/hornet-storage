@@ -1,12 +1,36 @@
 package config
 
 import (
+	"os"
 	"slices"
 	"testing"
 
 	"github.com/HORNET-Storage/hornet-storage/lib/types"
 	"github.com/spf13/viper"
 )
+
+func TestConfigValueForLogRedactsSecrets(t *testing.T) {
+	tests := []struct {
+		key      string
+		value    string
+		expected interface{}
+	}{
+		{key: "relay.private_key", value: "private", expected: redactedConfigValue},
+		{key: "relay.dht_seed", value: "seed", expected: redactedConfigValue},
+		{key: "external_services.wallet.wallet_api_key", value: "api-key", expected: redactedConfigValue},
+		{key: "auth-token", value: "token", expected: redactedConfigValue},
+		{key: "relay.relay_public_key", value: "public", expected: "public"},
+		{key: "relay.relay_name", value: "name", expected: "name"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.key, func(t *testing.T) {
+			if got := configValueForLog(test.key, test.value); got != test.expected {
+				t.Fatalf("expected %q to log as %v, got %v", test.key, test.expected, got)
+			}
+		})
+	}
+}
 
 func TestNormalizeAllowedUsersConfigValuesFromLegacyNestedScope(t *testing.T) {
 	viper.Reset()
@@ -95,5 +119,35 @@ func TestNormalizeOrganizationKindsAppendsMissingValuesAndIsIdempotent(t *testin
 	expectedWhitelist := []string{"kind1", "custom-handler", "kind39506", "kind39504", "kind39505"}
 	if got := config.EventFiltering.KindWhitelist; !slices.Equal(got, expectedWhitelist) {
 		t.Fatalf("expected kind whitelist %v, got %v", expectedWhitelist, got)
+	}
+}
+
+func TestSetDefaultsUsesRestrictedAccessForFreshInstall(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(workingDirectory); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	setDefaults()
+
+	if got := viper.GetString("allowed_users.mode"); got != "invite-only" {
+		t.Fatalf("expected fresh-install mode invite-only, got %q", got)
+	}
+	if got := viper.GetString("allowed_users.read"); got != "allowed_users" {
+		t.Fatalf("expected fresh-install read scope allowed_users, got %q", got)
+	}
+	if got := viper.GetString("allowed_users.write"); got != "allowed_users" {
+		t.Fatalf("expected fresh-install write scope allowed_users, got %q", got)
 	}
 }

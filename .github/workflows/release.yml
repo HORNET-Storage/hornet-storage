@@ -1,0 +1,221 @@
+name: Release relay stack
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      airlock_ref:
+        description: Airlock branch, tag, or commit
+        required: true
+        default: main
+        type: string
+      hyperswarm_ref:
+        description: Hornets hyperswarm branch, tag, or commit
+        required: true
+        default: master
+        type: string
+      nosis_cli_ref:
+        description: Nosis CLI branch, tag, or commit
+        required: true
+        default: main
+        type: string
+      relay_panel_ref:
+        description: Relay panel branch, tag, or commit
+        required: true
+        default: main
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.asset }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            asset: linux-amd64
+            executable_suffix: ""
+            archive: tar
+          - os: windows-2022
+            asset: windows-amd64
+            executable_suffix: .exe
+            archive: zip
+          - os: macos-15-intel
+            asset: macos-amd64
+            executable_suffix: ""
+            archive: tar
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Check out relay
+        uses: actions/checkout@v4
+        with:
+          path: sources/hornets-nostr-relay
+
+      - name: Check out Airlock
+        uses: actions/checkout@v4
+        with:
+          repository: HORNET-Storage/airlock
+          ref: ${{ inputs.airlock_ref || 'main' }}
+          token: ${{ secrets.HORNETS_REPO_TOKEN || github.token }}
+          path: sources/airlock
+
+      - name: Check out hyperswarm sidecar
+        uses: actions/checkout@v4
+        with:
+          repository: HORNET-Storage/hornets-hyperswarm
+          ref: ${{ inputs.hyperswarm_ref || 'master' }}
+          token: ${{ secrets.HORNETS_REPO_TOKEN || github.token }}
+          path: sources/hornets-hyperswarm
+
+      - name: Check out Nosis CLI library
+        uses: actions/checkout@v4
+        with:
+          repository: HORNET-Storage/nosis-cli
+          ref: ${{ inputs.nosis_cli_ref || 'main' }}
+          token: ${{ secrets.HORNETS_REPO_TOKEN || github.token }}
+          path: sources/nosis-cli
+
+      - name: Check out relay panel
+        uses: actions/checkout@v4
+        with:
+          repository: HORNET-Storage/HORNETS-Relay-Panel
+          ref: ${{ inputs.relay_panel_ref || 'main' }}
+          token: ${{ secrets.HORNETS_REPO_TOKEN || github.token }}
+          path: sources/hornets-relay-panel
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.24.1
+          cache-dependency-path: |
+            sources/hornets-nostr-relay/go.sum
+            sources/airlock/go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install Windows C compiler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install mingw --no-progress -y
+
+      - name: Install policy-aware npm
+        shell: bash
+        run: npm install --global npm@11.10.0
+
+      - name: Build sidecar
+        shell: bash
+        working-directory: sources/hornets-hyperswarm
+        run: |
+          set -euo pipefail
+          if [[ -f package-lock.json ]]; then npm ci; else npm install; fi
+          npm run build
+
+      - name: Build relay panel
+        shell: bash
+        working-directory: sources/hornets-relay-panel
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack prepare yarn@1.22.22 --activate
+          yarn install --frozen-lockfile
+          yarn build
+
+      - name: Build relay and Airlock
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+          EXE: ${{ matrix.executable_suffix }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/bin
+          (cd sources/hornets-nostr-relay && go build -trimpath -o "../../build/bin/hornets-relay${EXE}" ./services/server/port)
+          (cd sources/airlock && go build -trimpath -o "../../build/bin/airlock${EXE}" .)
+          cp "sources/hornets-hyperswarm/dist/hornets-hyperswarm${EXE}" "build/bin/hornets-hyperswarm${EXE}"
+          cp -R sources/hornets-hyperswarm/dist/prebuilds build/bin/prebuilds
+
+      - name: Assemble release directory
+        shell: bash
+        env:
+          ASSET: ${{ matrix.asset }}
+        run: |
+          set -euo pipefail
+          bundle="hornets-relay-${ASSET}"
+          mkdir -p "package/${bundle}/relay/web" "package/${bundle}/airlock"
+          cp -R sources/hornets-nostr-relay/release/bundle/. "package/${bundle}/"
+          cp -R build/bin "package/${bundle}/bin"
+          cp sources/hornets-nostr-relay/config.example.yaml "package/${bundle}/relay/config.example.yaml"
+          cp sources/airlock/config.example.yaml "package/${bundle}/airlock/config.example.yaml"
+          cp -R sources/hornets-relay-panel/build/. "package/${bundle}/relay/web/"
+          {
+            echo "Relay: $(git -C sources/hornets-nostr-relay rev-parse HEAD)"
+            echo "Airlock: $(git -C sources/airlock rev-parse HEAD)"
+            echo "Hyperswarm: $(git -C sources/hornets-hyperswarm rev-parse HEAD)"
+            echo "Nosis CLI: $(git -C sources/nosis-cli rev-parse HEAD)"
+            echo "Relay panel: $(git -C sources/hornets-relay-panel rev-parse HEAD)"
+          } > "package/${bundle}/BUILD-METADATA.txt"
+          test -f "package/${bundle}/README.md"
+          test -f "package/${bundle}/start.sh"
+          test -f "package/${bundle}/start.bat"
+          test -f "package/${bundle}/bin/hornets-relay${{ matrix.executable_suffix }}"
+          test -f "package/${bundle}/bin/airlock${{ matrix.executable_suffix }}"
+          test -f "package/${bundle}/bin/hornets-hyperswarm${{ matrix.executable_suffix }}"
+          test -d "package/${bundle}/bin/prebuilds"
+          test -f "package/${bundle}/relay/web/index.html"
+
+      - name: Create tar archive
+        if: matrix.archive == 'tar'
+        shell: bash
+        env:
+          ASSET: ${{ matrix.asset }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          archive="hornets-relay-${ASSET}.tar.gz"
+          tar -C package -czf "release-assets/${archive}" "hornets-relay-${ASSET}"
+          (cd release-assets && sha256sum "${archive}" > "${archive}.sha256")
+
+      - name: Create zip archive
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          $archiveName = "hornets-relay-${{ matrix.asset }}.zip"
+          $archivePath = Join-Path 'release-assets' $archiveName
+          Compress-Archive -Path "package/hornets-relay-${{ matrix.asset }}" -DestinationPath $archivePath -Force
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
+          "$hash  $archiveName" | Set-Content -Encoding ascii -LiteralPath "$archivePath.sha256"
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: hornets-relay-${{ matrix.asset }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: hornets-relay-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release-assets/*

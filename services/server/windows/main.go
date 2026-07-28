@@ -29,6 +29,7 @@ var (
 	bootstrapSetup = flag.Bool("bootstrap-setup", false, "Run first-time setup server before starting relay services")
 	setupHost      = flag.String("setup-host", "127.0.0.1", "Host/interface for first-time setup server")
 	setupPort      = flag.Int("setup-port", 11012, "Port for first-time setup server")
+	setupProfile   = flag.String("setup-profile", "nosis", "First-time setup profile: nosis or operator")
 )
 
 func main() {
@@ -64,15 +65,16 @@ func options(stop <-chan struct{}) core.Options {
 		BootstrapSetup: *bootstrapSetup,
 		SetupHost:      *setupHost,
 		SetupPort:      *setupPort,
+		SetupProfile:   *setupProfile,
 		Stop:           stop,
 	}
 }
 
 // runConsole behaves like the services/server/port build: core.Initialize
-// brings up config/logging/UPnP, SIGINT/SIGTERM trigger the same graceful
-// shutdown, and fatal startup errors terminate the process.
+// brings up config and logging, Run initializes UPnP from the final post-setup
+// configuration, and SIGINT/SIGTERM trigger the same graceful shutdown.
 func runConsole() {
-	// Initialize config, logging, and UPnP through the shared relay core
+	// Initialize config and logging before entering the shared run lifecycle
 	core.Initialize()
 
 	// Convert OS kill signals into the core stop channel

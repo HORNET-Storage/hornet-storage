@@ -77,6 +77,10 @@ func InitConfig() error {
 				fmt.Println("Created config.yaml from config.example.yaml")
 			}
 
+			if err := os.Chmod("config.yaml", 0600); err != nil {
+				return fmt.Errorf("failed to restrict generated config permissions: %w", err)
+			}
+
 			// Switch back to config.yaml and read it
 			viper.SetConfigFile("config.yaml")
 			if err := viper.ReadInConfig(); err != nil {
@@ -381,7 +385,7 @@ func safeWriteKeys(keys map[string]interface{}) error {
 		return fmt.Errorf("failed to marshal config YAML: %w", err)
 	}
 
-	if err := os.WriteFile(configPath, out, 0644); err != nil {
+	if err := os.WriteFile(configPath, out, 0600); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
@@ -537,6 +541,18 @@ func SaveConfig() error {
 	return reloadConfigCache()
 }
 
+const redactedConfigValue = "[REDACTED]"
+
+func configValueForLog(key string, value interface{}) interface{} {
+	normalizedKey := strings.ToLower(strings.ReplaceAll(key, "-", "_"))
+	for _, sensitivePart := range []string{"private_key", "secret_key", "api_key", "password", "token", "mnemonic", "seed"} {
+		if strings.Contains(normalizedKey, sensitivePart) {
+			return redactedConfigValue
+		}
+	}
+	return value
+}
+
 // UpdateConfig updates a configuration value and optionally saves it
 // Now with change detection to avoid unnecessary writes
 func UpdateConfig(key string, value interface{}, save bool) error {
@@ -552,7 +568,7 @@ func UpdateConfig(key string, value interface{}, save bool) error {
 		return nil
 	}
 
-	log.Printf("Updating %s: %v -> %v", canonicalKey, currentValue, value)
+	log.Printf("Updating %s: %v -> %v", canonicalKey, configValueForLog(canonicalKey, currentValue), configValueForLog(canonicalKey, value))
 	viper.Set(canonicalKey, value)
 
 	if save {
@@ -588,7 +604,7 @@ func UpdateMultipleSections(settings map[string]interface{}) error {
 			canonicalSectionName := canonicalConfigKey(sectionName)
 			currentValue := viper.Get(canonicalSectionName)
 			if !isConfigValueEqual(currentValue, sectionValue) {
-				log.Printf("Updating %s: %v -> %v", canonicalSectionName, currentValue, sectionValue)
+				log.Printf("Updating %s: %v -> %v", canonicalSectionName, configValueForLog(canonicalSectionName, currentValue), configValueForLog(canonicalSectionName, sectionValue))
 				viper.Set(canonicalSectionName, sectionValue)
 				changedKeys[canonicalSectionName] = sectionValue
 				for _, legacyKey := range legacyConfigAliasesForKey(canonicalSectionName) {
@@ -609,7 +625,7 @@ func UpdateMultipleSections(settings map[string]interface{}) error {
 					nestedKey := canonicalConfigKey(fullKey + "." + nestedField)
 					currentValue := viper.Get(nestedKey)
 					if !isConfigValueEqual(currentValue, nestedValue) {
-						log.Printf("  Updating %s: %v -> %v", nestedKey, currentValue, nestedValue)
+						log.Printf("  Updating %s: %v -> %v", nestedKey, configValueForLog(nestedKey, currentValue), configValueForLog(nestedKey, nestedValue))
 						viper.Set(nestedKey, nestedValue)
 						changedKeys[nestedKey] = nestedValue
 						for _, legacyKey := range legacyConfigAliasesForKey(nestedKey) {
@@ -621,7 +637,7 @@ func UpdateMultipleSections(settings map[string]interface{}) error {
 				canonicalKey := canonicalConfigKey(fullKey)
 				currentValue := viper.Get(canonicalKey)
 				if !isConfigValueEqual(currentValue, fieldValue) {
-					log.Printf("  Updating %s: %v -> %v", canonicalKey, currentValue, fieldValue)
+					log.Printf("  Updating %s: %v -> %v", canonicalKey, configValueForLog(canonicalKey, currentValue), configValueForLog(canonicalKey, fieldValue))
 					viper.Set(canonicalKey, fieldValue)
 					changedKeys[canonicalKey] = fieldValue
 					for _, legacyKey := range legacyConfigAliasesForKey(canonicalKey) {
@@ -959,7 +975,7 @@ func setDefaults() {
 	viper.SetDefault("relay.version", "0.0.1")
 	viper.SetDefault("relay.service_tag", "hornet-storage-service")
 	viper.SetDefault("relay.supported_nips", []int{1, 2, 9, 11, 18, 23, 24, 25, 42, 45, 50, 51, 56, 57, 65, 116, 555, 888})
-	viper.SetDefault("relay.secret_key", "hornets-secret-key")
+	viper.SetDefault("relay.secret_key", "")
 	viper.SetDefault("relay.private_key", "")
 	viper.SetDefault("relay.public_key", "")
 	viper.SetDefault("relay.dht_seed", "")
@@ -1029,10 +1045,11 @@ func setDefaults() {
 	viper.SetDefault("event_filtering.media_definitions.binary.extensions", []string{".bin", ".dat", ".blob"})
 	viper.SetDefault("event_filtering.media_definitions.binary.max_size_mb", 100)
 
-	// Allowed users defaults - public relay for rapid testing
-	viper.SetDefault("allowed_users.mode", "public")
-	viper.SetDefault("allowed_users.read", "all_users")
-	viper.SetDefault("allowed_users.write", "all_users")
+	// Secure-by-default access settings. Operators can explicitly opt into a
+	// public relay, but a fresh configuration must not accept unrestricted writes.
+	viper.SetDefault("allowed_users.mode", "invite-only")
+	viper.SetDefault("allowed_users.read", "allowed_users")
+	viper.SetDefault("allowed_users.write", "allowed_users")
 	viper.SetDefault("allowed_users.repo_access_override_kinds", []int{72, 73, 74, 75, 76, 77, 1111, 6927, 7007, 31415, 16630, 31416, 30078, 30301, 30302, 30303})
 	viper.SetDefault("allowed_users.last_updated", 0)
 	viper.SetDefault("allowed_users.batch_update_on_startup", false) // Disable batch update by default for performance

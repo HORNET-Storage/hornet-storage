@@ -74,9 +74,8 @@ func (s *relayService) Execute(args []string, requests <-chan svc.ChangeRequest,
 
 	status <- svc.Status{State: svc.StartPending, WaitHint: uint32(startupWaitHint / time.Millisecond)}
 
-	// Initialize config, logging, and UPnP through the shared relay core.
-	// Fatal configuration errors exit the process here, which the SCM
-	// records as a failure so the recovery ladder can restart the service.
+	// Initialize config and logging. The shared Run lifecycle initializes UPnP
+	// only after first-time setup has applied and reloaded the final config.
 	core.Initialize()
 
 	stop := make(chan struct{})

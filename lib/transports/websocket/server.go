@@ -254,7 +254,7 @@ func BuildBlossomServer(store stores.Store) *fiber.App {
 
 // StartBlossomServer starts the Blossom server on its own port (base_port + 5)
 func StartBlossomServer(app *fiber.App) error {
-	address := viper.GetString("server.address")
+	address := viper.GetString("server.bind_address")
 	port := config.GetPort("blossom")
 	cleanupUPnP := forwardPortIfEnabled(port, "Hornet Storage Blossom")
 	defer cleanupUPnP()
@@ -279,7 +279,7 @@ func StartServer(app *fiber.App) error {
 		logging.Fatalf("Failed to generate global challenge: %v", err)
 	}
 
-	address := viper.GetString("server.address")
+	address := viper.GetString("server.bind_address")
 	port := config.GetPort("nostr")
 	cleanupUPnP := forwardPortIfEnabled(port, "Hornet Storage Nostr Relay")
 	defer cleanupUPnP()

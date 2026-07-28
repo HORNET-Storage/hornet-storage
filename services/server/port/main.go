@@ -17,13 +17,15 @@ var (
 	bootstrapSetup = flag.Bool("bootstrap-setup", false, "Run first-time setup server before starting relay services")
 	setupHost      = flag.String("setup-host", "127.0.0.1", "Host/interface for first-time setup server")
 	setupPort      = flag.Int("setup-port", 11012, "Port for first-time setup server")
+	setupProfile   = flag.String("setup-profile", "nosis", "First-time setup profile: nosis or operator")
 )
 
 func init() {
 	// Parse command-line flags early
 	flag.Parse()
 
-	// Initialize config, logging, and UPnP through the shared relay core
+	// Initialize config and logging. Run initializes UPnP after any first-time
+	// setup configuration has been applied and reloaded.
 	core.Initialize()
 }
 
@@ -44,6 +46,7 @@ func main() {
 		BootstrapSetup: *bootstrapSetup,
 		SetupHost:      *setupHost,
 		SetupPort:      *setupPort,
+		SetupProfile:   *setupProfile,
 		Stop:           stop,
 	}); err != nil {
 		logging.Fatalf("Relay exited with error: %v", err)

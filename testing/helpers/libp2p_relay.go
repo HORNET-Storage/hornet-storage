@@ -2,6 +2,7 @@
 package helpers
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	merkle_dag "github.com/HORNET-Storage/Scionic-Merkle-Tree/v2/dag"
+	"github.com/HORNET-Storage/hdk-nostr-go/lib/connmgr"
 	hsListener "github.com/HORNET-Storage/hdk-nostr-go/lib/connmgr/hyperswarm"
 	"github.com/HORNET-Storage/hdk-nostr-go/lib/signing"
 	"github.com/HORNET-Storage/hornet-storage/lib/config"
@@ -96,7 +98,12 @@ func NewTestLibp2pRelay(cfg TestLibp2pRelayConfig) (*TestLibp2pRelay, error) {
 	}
 
 	// Create hyperswarm listener via sidecar
-	hsClient := sidecar.GetClient()
+	hsClient, err := sidecar.GetClient()
+	if err != nil {
+		os.RemoveAll(dataDir)
+		store.Cleanup()
+		return nil, fmt.Errorf("failed to connect to hyperswarm sidecar: %w", err)
+	}
 	listener := hsListener.NewHyperswarmListener(hsClient)
 
 	dhtKey := viper.GetString("relay.dht_seed")
@@ -201,6 +208,21 @@ func (r *TestLibp2pRelay) WaitForReady(timeout time.Duration) error {
 	return fmt.Errorf("timeout waiting for relay to be ready")
 }
 
+// GetConnectionManager creates a client connection to this test relay through the
+// same hyperswarm sidecar used by the listener.
+func (r *TestLibp2pRelay) GetConnectionManager(ctx context.Context) (connmgr.ConnectionManager, error) {
+	hsClient, err := sidecar.GetClient()
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to hyperswarm sidecar: %w", err)
+	}
+
+	manager := connmgr.NewGenericConnectionManager()
+	if err := manager.ConnectWithHyperswarm(ctx, "test-relay", r.DHTPublicKey, hsClient); err != nil {
+		return nil, fmt.Errorf("failed to connect to test relay: %w", err)
+	}
+	return manager, nil
+}
+
 // initTestLibp2pConfig initializes viper config for testing
 func initTestLibp2pConfig(dataDir string, cfg TestLibp2pRelayConfig) {
 	viper.Reset()
@@ -213,7 +235,7 @@ func initTestLibp2pConfig(dataDir string, cfg TestLibp2pRelayConfig) {
 		viper.Set("relay.private_key", cfg.PrivateKey)
 	}
 
-	viper.Set("relay.dht_seed", "test-dht-key-seed")
+	viper.Set("relay.dht_seed", "c600149fe1207dd0cf5284d0a4bd767dc192181940d2a2b08f9571445f308a02")
 
 	viper.Set("upload.enabled_uploads", []string{"all"})
 	viper.Set("content_filtering.image_moderation.enabled", false)

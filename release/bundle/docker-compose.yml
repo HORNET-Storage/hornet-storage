@@ -1,0 +1,18 @@
+services:
+  hornets-relay:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "11000:11000"
+      - "11002:11002"
+      - "127.0.0.1:11012:11012"
+    volumes:
+      - relay-data:/data/relay
+      - airlock-data:/data/airlock
+    stop_grace_period: 20s
+
+volumes:
+  relay-data:
+  airlock-data:

@@ -6,14 +6,17 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/HORNET-Storage/hdk-nostr-go/lib/signing"
 	"github.com/HORNET-Storage/hornet-storage/lib/logging"
 	statistics_gorm_sqlite "github.com/HORNET-Storage/hornet-storage/lib/stores/statistics/gorm/sqlite"
+	synckeys "github.com/HORNET-Storage/hornet-storage/lib/sync"
 	"github.com/gofiber/fiber/v2"
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
@@ -26,6 +29,23 @@ type setupPayload struct {
 	RelayOwnerPubkey  string                 `json:"relayOwnerPubkey"`
 }
 
+// BootstrapSetupProfile selects the server-owned first-run policy. It is never
+// accepted from the browser payload, so a client cannot swap setup policy.
+type BootstrapSetupProfile string
+
+const (
+	BootstrapSetupProfileNosis    BootstrapSetupProfile = "nosis"
+	BootstrapSetupProfileOperator BootstrapSetupProfile = "operator"
+)
+
+type bootstrapSetupSession struct {
+	profile           BootstrapSetupProfile
+	relayPrivateKey   string
+	relaySecret       string
+	walletAPIKey      string
+	airlockConfigPath string
+}
+
 func setupMarkerPath() string {
 	dataPath := viper.GetString("server.data_path")
 	if dataPath == "" {
@@ -34,12 +54,80 @@ func setupMarkerPath() string {
 	return filepath.Join(dataPath, ".hornets_setup_complete")
 }
 
-func setupToken() (string, error) {
-	buf := make([]byte, 24)
+func randomHex(byteCount int) (string, error) {
+	buf := make([]byte, byteCount)
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(buf), nil
+}
+
+func setupToken() (string, error) {
+	return randomHex(24)
+}
+
+func parseBootstrapSetupProfile(value string) (BootstrapSetupProfile, error) {
+	switch BootstrapSetupProfile(strings.ToLower(strings.TrimSpace(value))) {
+	case "", BootstrapSetupProfileNosis:
+		return BootstrapSetupProfileNosis, nil
+	case BootstrapSetupProfileOperator:
+		return BootstrapSetupProfileOperator, nil
+	default:
+		return "", fmt.Errorf("unknown bootstrap setup profile %q", value)
+	}
+}
+
+func generateRelayPrivateKey() (string, error) {
+	privateKey, err := signing.GeneratePrivateKey()
+	if err != nil {
+		return "", fmt.Errorf("failed to generate relay private key: %w", err)
+	}
+	serialized, err := signing.SerializePrivateKey(privateKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to serialize relay private key: %w", err)
+	}
+	return *serialized, nil
+}
+
+func newBootstrapSetupSession(profile BootstrapSetupProfile, relayDefaults map[string]interface{}) (*bootstrapSetupSession, error) {
+	session := &bootstrapSetupSession{profile: profile}
+	if profile == BootstrapSetupProfileNosis {
+		return session, nil
+	}
+	if profile != BootstrapSetupProfileOperator {
+		return nil, fmt.Errorf("unsupported bootstrap setup profile %q", profile)
+	}
+	session.airlockConfigPath = defaultAirlockConfigPath()
+	externalServices, _ := relayDefaults["external_services"].(map[string]interface{})
+	walletCfg, _ := externalServices["wallet"].(map[string]interface{})
+	session.walletAPIKey = stringSetting(walletCfg["key"])
+
+	relayCfg, _ := relayDefaults["relay"].(map[string]interface{})
+	existingPrivateKey := stringSetting(relayCfg["private_key"])
+	if existingPrivateKey != "" {
+		if _, err := deriveRelayPublicKeyFromPrivateKey(existingPrivateKey); err != nil {
+			return nil, fmt.Errorf("configured relay private key is invalid: %w", err)
+		}
+		session.relayPrivateKey = existingPrivateKey
+	}
+	if session.relayPrivateKey == "" {
+		generatedPrivateKey, err := generateRelayPrivateKey()
+		if err != nil {
+			return nil, err
+		}
+		session.relayPrivateKey = generatedPrivateKey
+	}
+
+	session.relaySecret = stringSetting(relayCfg["secret_key"])
+	if session.relaySecret == "" {
+		generatedSecret, err := randomHex(32)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate relay shared secret: %w", err)
+		}
+		session.relaySecret = generatedSecret
+	}
+
+	return session, nil
 }
 
 func writeYAMLAtomic(path string, data map[string]interface{}) error {
@@ -54,7 +142,7 @@ func writeYAMLAtomic(path string, data map[string]interface{}) error {
 		return err
 	}
 	tmp := fmt.Sprintf("%s.tmp.%d", path, time.Now().UnixNano())
-	if err := os.WriteFile(tmp, encoded, 0644); err != nil {
+	if err := os.WriteFile(tmp, encoded, 0600); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -65,11 +153,24 @@ func writeYAMLAtomic(path string, data map[string]interface{}) error {
 }
 
 func writeSetupMarker() error {
-	marker := setupMarkerPath()
-	if err := os.MkdirAll(filepath.Dir(marker), os.ModePerm); err != nil {
-		return err
+	return writeSetupMarkerForConfig(nil)
+}
+
+func writeSetupMarkerForConfig(relayConfig map[string]interface{}) error {
+	markerPaths := map[string]struct{}{setupMarkerPath(): {}}
+	if relayConfig != nil {
+		markerPaths[filepath.Join(relayDataPath(relayConfig), ".hornets_setup_complete")] = struct{}{}
 	}
-	return os.WriteFile(marker, []byte(time.Now().Format(time.RFC3339)), 0644)
+
+	for marker := range markerPaths {
+		if err := os.MkdirAll(filepath.Dir(marker), os.ModePerm); err != nil {
+			return err
+		}
+		if err := os.WriteFile(marker, []byte(time.Now().Format(time.RFC3339)), 0644); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func needsBootstrapSetup() bool {
@@ -127,6 +228,95 @@ func stringSetting(value interface{}) string {
 	return strings.TrimSpace(fmt.Sprint(value))
 }
 
+func integerSetting(value interface{}) (int, bool) {
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int8:
+		return int(typed), true
+	case int16:
+		return int(typed), true
+	case int32:
+		return int(typed), true
+	case int64:
+		return int(typed), true
+	case uint:
+		return int(typed), true
+	case uint8:
+		return int(typed), true
+	case uint16:
+		return int(typed), true
+	case uint32:
+		return int(typed), true
+	case uint64:
+		if uint64(int(typed)) != typed {
+			return 0, false
+		}
+		return int(typed), true
+	case float32:
+		parsed := int(typed)
+		return parsed, float32(parsed) == typed
+	case float64:
+		parsed := int(typed)
+		return parsed, float64(parsed) == typed
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(typed))
+		return parsed, err == nil
+	default:
+		parsed, err := strconv.Atoi(stringSetting(value))
+		return parsed, err == nil
+	}
+}
+
+func normalizePort(value interface{}, fallback int, fieldName string) (int, error) {
+	if stringSetting(value) == "" {
+		return fallback, nil
+	}
+	port, ok := integerSetting(value)
+	if !ok || port < 1 || port > 65535 {
+		return 0, fmt.Errorf("%s must be an integer between 1 and 65535", fieldName)
+	}
+	return port, nil
+}
+
+func normalizeBool(value interface{}, fallback bool, fieldName string) (bool, error) {
+	if value == nil || stringSetting(value) == "" {
+		return fallback, nil
+	}
+	if parsed, ok := value.(bool); ok {
+		return parsed, nil
+	}
+	parsed, err := strconv.ParseBool(stringSetting(value))
+	if err != nil {
+		return false, fmt.Errorf("%s must be true or false", fieldName)
+	}
+	return parsed, nil
+}
+
+func normalizeIPv4BindAddress(value interface{}, fallback string, fieldName string) (string, error) {
+	address := stringSetting(value)
+	if address == "" {
+		address = fallback
+	}
+	parsed := net.ParseIP(address)
+	if parsed == nil || parsed.To4() == nil {
+		return "", fmt.Errorf("%s must be a valid IPv4 bind address", fieldName)
+	}
+	return address, nil
+}
+
+func validateHostPort(value string, fieldName string) error {
+	host, portText, err := net.SplitHostPort(strings.TrimSpace(value))
+	if err != nil || strings.TrimSpace(host) == "" {
+		return fmt.Errorf("%s must be a host:port address", fieldName)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("%s must use a port between 1 and 65535", fieldName)
+	}
+	return nil
+}
+
 func syncBootstrapAccessSettings(relayConfig map[string]interface{}) error {
 	if relayConfig == nil {
 		return nil
@@ -136,9 +326,97 @@ func syncBootstrapAccessSettings(relayConfig map[string]interface{}) error {
 	allowedUsers["mode"] = "invite-only"
 	allowedUsers["read"] = "allowed_users"
 	allowedUsers["write"] = "allowed_users"
-
 	allowedUsers["last_updated"] = time.Now().Unix()
 	return nil
+}
+
+func syncOperatorAccessSettings(relayConfig map[string]interface{}) error {
+	allowedUsers := ensureNestedMap(relayConfig, "allowed_users")
+	mode := strings.ToLower(stringSetting(allowedUsers["mode"]))
+	if mode == "" {
+		mode = "public"
+	}
+
+	switch mode {
+	case "public":
+		allowedUsers["read"] = "all_users"
+		allowedUsers["write"] = "all_users"
+	case "invite-only":
+		allowedUsers["read"] = "allowed_users"
+		allowedUsers["write"] = "allowed_users"
+	case "only-me":
+		allowedUsers["read"] = "only-me"
+		allowedUsers["write"] = "only-me"
+	case "subscription":
+		allowedUsers["read"] = "paid_users"
+		allowedUsers["write"] = "paid_users"
+	default:
+		return fmt.Errorf("allowed_users.mode must be public, invite-only, only-me, or subscription")
+	}
+
+	allowedUsers["mode"] = mode
+	allowedUsers["last_updated"] = time.Now().Unix()
+	return nil
+}
+
+func prepareOperatorSetupDefaults(relayConfig map[string]interface{}, airlockConfig map[string]interface{}) {
+	allowedUsers := ensureNestedMap(relayConfig, "allowed_users")
+	allowedUsers["mode"] = "public"
+	allowedUsers["read"] = "all_users"
+	allowedUsers["write"] = "all_users"
+
+	serverCfg := ensureNestedMap(relayConfig, "server")
+	if stringSetting(serverCfg["bind_address"]) == "" {
+		serverCfg["bind_address"] = "0.0.0.0"
+	}
+	if stringSetting(serverCfg["port"]) == "" {
+		serverCfg["port"] = 11000
+	}
+	serverCfg["upnp"] = false
+	if stringSetting(serverCfg["data_path"]) == "" {
+		serverCfg["data_path"] = "./data"
+	}
+
+	relayCfg := ensureNestedMap(relayConfig, "relay")
+	delete(relayCfg, "private_key")
+	delete(relayCfg, "secret_key")
+	delete(relayCfg, "public_key")
+	delete(relayCfg, "dht_seed")
+	delete(relayCfg, "dht_public_key")
+	delete(relayCfg, "dht_private_key")
+	delete(relayCfg, "dht_key")
+
+	externalServices := ensureNestedMap(relayConfig, "external_services")
+	walletCfg := ensureNestedMap(externalServices, "wallet")
+	delete(walletCfg, "key")
+
+	relaySidecar := ensureNestedMap(relayConfig, "sidecar")
+	if stringSetting(relaySidecar["address"]) == "" {
+		relaySidecar["address"] = "127.0.0.1:9100"
+	}
+	if stringSetting(relaySidecar["mode"]) == "" {
+		relaySidecar["mode"] = "persistent"
+	}
+
+	delete(airlockConfig, "private_key")
+	airlockConfig["bind_address"] = "127.0.0.1"
+	if stringSetting(airlockConfig["port"]) == "" {
+		airlockConfig["port"] = 11006
+	}
+	if stringSetting(airlockConfig["relay"]) == "" {
+		airlockConfig["relay"] = "127.0.0.1:11000"
+	}
+	if stringSetting(airlockConfig["repository_path"]) == "" {
+		airlockConfig["repository_path"] = "repositories"
+	}
+
+	airlockSidecar := ensureNestedMap(airlockConfig, "sidecar")
+	if stringSetting(airlockSidecar["address"]) == "" {
+		airlockSidecar["address"] = stringSetting(relaySidecar["address"])
+	}
+	if stringSetting(airlockSidecar["mode"]) == "" {
+		airlockSidecar["mode"] = stringSetting(relaySidecar["mode"])
+	}
 }
 
 func deriveRelayPublicKeyFromPrivateKey(privateKey string) (string, error) {
@@ -199,6 +477,16 @@ func persistBootstrapRelayOwner(relayConfig map[string]interface{}, relayOwnerPu
 }
 
 func prepareBootstrapSetupPayload(payload *setupPayload) error {
+	return prepareBootstrapSetupPayloadForSession(payload, &bootstrapSetupSession{profile: BootstrapSetupProfileNosis})
+}
+
+func prepareBootstrapSetupPayloadForSession(payload *setupPayload, session *bootstrapSetupSession) error {
+	if payload == nil {
+		return fmt.Errorf("setup payload is required")
+	}
+	if session == nil {
+		return fmt.Errorf("bootstrap setup session is required")
+	}
 	if payload.RelayConfig == nil {
 		payload.RelayConfig = map[string]interface{}{}
 	}
@@ -206,22 +494,66 @@ func prepareBootstrapSetupPayload(payload *setupPayload) error {
 		payload.AirlockConfig = map[string]interface{}{}
 	}
 
-	if err := syncBootstrapAccessSettings(payload.RelayConfig); err != nil {
-		return err
-	}
-
-	relayCfg, _ := payload.RelayConfig["relay"].(map[string]interface{})
+	relayCfg := ensureNestedMap(payload.RelayConfig, "relay")
 	privateKey := stringSetting(relayCfg["private_key"])
-	if privateKey == "" {
-		return fmt.Errorf("relay.private_key is required")
+
+	switch session.profile {
+	case BootstrapSetupProfileNosis:
+		if err := syncBootstrapAccessSettings(payload.RelayConfig); err != nil {
+			return err
+		}
+		if privateKey == "" {
+			return fmt.Errorf("relay.private_key is required")
+		}
+	case BootstrapSetupProfileOperator:
+		payload.AirlockConfigPath = session.airlockConfigPath
+		externalServices := ensureNestedMap(payload.RelayConfig, "external_services")
+		walletCfg := ensureNestedMap(externalServices, "wallet")
+		if stringSetting(walletCfg["key"]) == "" && session.walletAPIKey != "" {
+			walletCfg["key"] = session.walletAPIKey
+		}
+		if privateKey == "" {
+			privateKey = session.relayPrivateKey
+			relayCfg["private_key"] = privateKey
+		}
+		if privateKey == "" {
+			return fmt.Errorf("operator relay identity is unavailable")
+		}
+		if stringSetting(relayCfg["secret_key"]) == "" {
+			relayCfg["secret_key"] = session.relaySecret
+		}
+		if err := syncOperatorAccessSettings(payload.RelayConfig); err != nil {
+			return err
+		}
+		if err := normalizeOperatorNetworkSettings(payload); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported bootstrap setup profile %q", session.profile)
 	}
 
 	derivedRelayPubkey, err := deriveRelayPublicKeyFromPrivateKey(privateKey)
 	if err != nil {
 		return err
 	}
-	if stringSetting(relayCfg["public_key"]) == "" {
+	configuredRelayPubkey := stringSetting(relayCfg["public_key"])
+	if session.profile == BootstrapSetupProfileOperator && configuredRelayPubkey != "" {
+		normalizedConfiguredPubkey, err := normalizeRelayOwnerPubkey(configuredRelayPubkey, "")
+		if err != nil {
+			return fmt.Errorf("invalid relay.public_key: %w", err)
+		}
+		if normalizedConfiguredPubkey != derivedRelayPubkey {
+			return fmt.Errorf("relay.public_key does not match relay.private_key")
+		}
+	}
+	if configuredRelayPubkey == "" || session.profile == BootstrapSetupProfileOperator {
 		relayCfg["public_key"] = derivedRelayPubkey
+	}
+
+	if session.profile == BootstrapSetupProfileOperator {
+		if err := syncOperatorDHTIdentity(relayCfg, privateKey); err != nil {
+			return err
+		}
 	}
 
 	relayOwnerPubkey, err := normalizeRelayOwnerPubkey(payload.RelayOwnerPubkey, derivedRelayPubkey)
@@ -233,21 +565,140 @@ func prepareBootstrapSetupPayload(payload *setupPayload) error {
 	return syncAirlockDHTPubkeyIntoRelayConfig(payload.RelayConfig, payload.AirlockConfig)
 }
 
+func syncOperatorDHTIdentity(relayCfg map[string]interface{}, privateKey string) error {
+	dhtSeed := stringSetting(relayCfg["dht_seed"])
+	if dhtSeed == "" {
+		dhtSeed = stringSetting(relayCfg["dht_key"])
+	}
+
+	var (
+		identity *synckeys.DHTIdentity
+		err      error
+	)
+	if dhtSeed == "" {
+		identity, err = synckeys.DeriveDHTIdentityFromPrivateKey(privateKey)
+	} else {
+		identity, err = synckeys.DeriveDHTIdentityFromSeed(dhtSeed)
+	}
+	if err != nil {
+		return fmt.Errorf("invalid relay DHT identity: %w", err)
+	}
+
+	relayCfg["dht_seed"] = identity.Seed
+	relayCfg["dht_public_key"] = identity.PublicKey
+	relayCfg["dht_private_key"] = identity.PrivateKey
+	delete(relayCfg, "dht_key")
+	return nil
+}
+
+func normalizeOperatorNetworkSettings(payload *setupPayload) error {
+	serverCfg := ensureNestedMap(payload.RelayConfig, "server")
+	bindAddress, err := normalizeIPv4BindAddress(serverCfg["bind_address"], "0.0.0.0", "server.bind_address")
+	if err != nil {
+		return err
+	}
+	serverPort, err := normalizePort(serverCfg["port"], 11000, "server.port")
+	if err != nil {
+		return err
+	}
+	if serverPort > 65530 {
+		return fmt.Errorf("server.port must be at most 65530 because relay services use ports through server.port + 5")
+	}
+	upnpEnabled, err := normalizeBool(serverCfg["upnp"], false, "server.upnp")
+	if err != nil {
+		return err
+	}
+	dataPath := stringSetting(serverCfg["data_path"])
+	if dataPath == "" {
+		dataPath = "./data"
+	}
+	serverCfg["bind_address"] = bindAddress
+	serverCfg["port"] = serverPort
+	serverCfg["upnp"] = upnpEnabled
+	serverCfg["data_path"] = dataPath
+
+	relaySidecar := ensureNestedMap(payload.RelayConfig, "sidecar")
+	relaySidecarAddress := stringSetting(relaySidecar["address"])
+	if relaySidecarAddress == "" {
+		relaySidecarAddress = "127.0.0.1:9100"
+	}
+	if err := validateHostPort(relaySidecarAddress, "sidecar.address"); err != nil {
+		return err
+	}
+	relaySidecarMode := strings.ToLower(stringSetting(relaySidecar["mode"]))
+	if relaySidecarMode == "" {
+		relaySidecarMode = "persistent"
+	}
+	if relaySidecarMode != "persistent" && relaySidecarMode != "ephemeral" {
+		return fmt.Errorf("sidecar.mode must be persistent or ephemeral")
+	}
+	relaySidecar["address"] = relaySidecarAddress
+	relaySidecar["mode"] = relaySidecarMode
+
+	airlockBindAddress, err := normalizeIPv4BindAddress(payload.AirlockConfig["bind_address"], "127.0.0.1", "airlock.bind_address")
+	if err != nil {
+		return err
+	}
+	airlockPort, err := normalizePort(payload.AirlockConfig["port"], 11006, "airlock.port")
+	if err != nil {
+		return err
+	}
+	if airlockPort > 65534 {
+		return fmt.Errorf("airlock.port must be at most 65534 because its WebSocket proxy uses airlock.port + 1")
+	}
+	airlockRelay := stringSetting(payload.AirlockConfig["relay"])
+	if airlockRelay == "" {
+		airlockRelay = fmt.Sprintf("127.0.0.1:%d", serverPort)
+	}
+	if err := validateHostPort(airlockRelay, "airlock.relay"); err != nil {
+		return err
+	}
+	repositoryPath := stringSetting(payload.AirlockConfig["repository_path"])
+	if repositoryPath == "" {
+		repositoryPath = "repositories"
+	}
+	payload.AirlockConfig["bind_address"] = airlockBindAddress
+	payload.AirlockConfig["port"] = airlockPort
+	payload.AirlockConfig["relay"] = airlockRelay
+	payload.AirlockConfig["repository_path"] = repositoryPath
+
+	airlockSidecar := ensureNestedMap(payload.AirlockConfig, "sidecar")
+	airlockSidecarAddress := stringSetting(airlockSidecar["address"])
+	if airlockSidecarAddress == "" {
+		airlockSidecarAddress = relaySidecarAddress
+	}
+	if err := validateHostPort(airlockSidecarAddress, "airlock.sidecar.address"); err != nil {
+		return err
+	}
+	airlockSidecarMode := strings.ToLower(stringSetting(airlockSidecar["mode"]))
+	if airlockSidecarMode == "" {
+		airlockSidecarMode = relaySidecarMode
+	}
+	if airlockSidecarMode != "persistent" && airlockSidecarMode != "ephemeral" {
+		return fmt.Errorf("airlock.sidecar.mode must be persistent or ephemeral")
+	}
+	airlockSidecar["address"] = airlockSidecarAddress
+	airlockSidecar["mode"] = airlockSidecarMode
+	return nil
+}
+
 func syncAirlockDHTPubkeyIntoRelayConfig(relayConfig map[string]interface{}, airlockConfig map[string]interface{}) error {
 	if relayConfig == nil {
 		return nil
 	}
 
-	privateKey := strings.TrimSpace(fmt.Sprint(airlockConfig["private_key"]))
+	privateKey := stringSetting(airlockConfig["private_key"])
+	domainSeparated := false
 	if privateKey == "" {
 		relayCfg, _ := relayConfig["relay"].(map[string]interface{})
-		privateKey = strings.TrimSpace(fmt.Sprint(relayCfg["private_key"]))
+		privateKey = stringSetting(relayCfg["private_key"])
+		domainSeparated = true
 	}
 	if privateKey == "" {
 		return nil
 	}
 
-	airlockDHTPublicKey, err := deriveAirlockDHTPublicKeyFromPrivateKey(privateKey)
+	airlockDHTPublicKey, err := deriveAirlockDHTPublicKeyFromPrivateKey(privateKey, domainSeparated)
 	if err != nil {
 		return err
 	}
@@ -503,7 +954,7 @@ func renderBootstrapSetupPage(token string) string {
 			<div class="card lead">
 				<div class="eyebrow">First-time setup</div>
 				<h1>Bring your relay online.</h1>
-				<p>Set your relay identity once and keep the rest automatic. Airlock will reuse the same private key unless you explicitly override it in Advanced.</p>
+				<p>Set your relay identity once and keep the rest automatic. Airlock reads this identity from the sibling relay config unless you explicitly override it in Advanced.</p>
 				<div class="inline-note">
 					<div class="note">Default flow</div>
 					<div>Only your relay name, icon, optional description/contact, and private key belong on the first screen.</div>
@@ -513,7 +964,8 @@ func renderBootstrapSetupPage(token string) string {
 				<h2>What happens next</h2>
 				<ul class="checklist">
 					<li>Relay public and DHT keys are derived from the relay private key when left blank.</li>
-					<li>Airlock inherits the relay private key unless you override it.</li>
+					<li>Airlock derives a domain-separated DHT identity from the relay key without storing a second copy.</li>
+					<li>The colocated hyperswarm sidecar is discovered automatically.</li>
 					<li>Advanced overrides stay available for custom paths, sidecar settings, and raw JSON patches.</li>
 				</ul>
 			</div>
@@ -542,7 +994,7 @@ func renderBootstrapSetupPage(token string) string {
 				<div class="field full">
 					<label for="relay_private_key">Relay private key</label>
 					<input id="relay_private_key" class="key-input" placeholder="hex or nsec key used to identify this relay">
-					<div class="tip">Airlock will reuse this key automatically unless you set a separate Airlock key in Advanced.</div>
+					<div class="tip">Airlock will derive its own domain-separated DHT identity from this key unless you set a separate Airlock key in Advanced.</div>
 					<div id="relay_private_key_lock_hint" class="tip" hidden>Nosis supplied the signed-in private key for this relay. It is locked here to prevent invite-only access mismatches.</div>
 				</div>
 				<div class="field full subcard">
@@ -602,7 +1054,7 @@ func renderBootstrapSetupPage(token string) string {
 					<div class="form-grid">
 						<div class="field">
 							<label for="airlock_private_key">Airlock private key</label>
-							<input id="airlock_private_key" class="key-input" placeholder="defaults to the relay private key">
+							<input id="airlock_private_key" class="key-input" placeholder="optional separate Airlock identity">
 						</div>
 						<div class="field">
 							<label for="airlock_config_path">Airlock config path</label>
@@ -610,7 +1062,7 @@ func renderBootstrapSetupPage(token string) string {
 						</div>
 						<div class="field">
 							<label for="airlock_bind_address">Bind address</label>
-							<input id="airlock_bind_address" placeholder="0.0.0.0">
+							<input id="airlock_bind_address" placeholder="127.0.0.1">
 						</div>
 						<div class="field">
 							<label for="airlock_port">Port</label>
@@ -637,7 +1089,7 @@ func renderBootstrapSetupPage(token string) string {
 						</div>
 						<div class="field full">
 							<label for="airlock_sidecar_executable">Sidecar executable path</label>
-							<input id="airlock_sidecar_executable" placeholder="leave blank to keep the configured installer path">
+							<input id="airlock_sidecar_executable" placeholder="leave blank for automatic discovery">
 						</div>
 					</div>
 				</section>
@@ -794,11 +1246,11 @@ func renderBootstrapSetupPage(token string) string {
 			relay.server.upnp = Boolean(el("relay_upnp").checked);
 
 			const airlockPort = el("airlock_port").value.trim();
-			airlock.bind_address = el("airlock_bind_address").value.trim() || airlock.bind_address || "0.0.0.0";
+			airlock.bind_address = el("airlock_bind_address").value.trim() || airlock.bind_address || "127.0.0.1";
 			airlock.port = Number(airlockPort || airlock.port || 11006);
 			airlock.relay = el("airlock_relay").value.trim() || airlock.relay || "127.0.0.1:11000";
 			airlock.repository_path = el("airlock_repository_path").value.trim() || airlock.repository_path || "repositories";
-			airlock.private_key = el("airlock_private_key").value.trim() || relayPrivateKey;
+			airlock.private_key = el("airlock_private_key").value.trim();
 			airlock.sidecar.address = el("airlock_sidecar_address").value.trim() || airlock.sidecar.address || "127.0.0.1:9100";
 			airlock.sidecar.mode = el("airlock_sidecar_mode").value.trim() || airlock.sidecar.mode || "persistent";
 			airlock.sidecar.executable = el("airlock_sidecar_executable").value.trim() || airlock.sidecar.executable || "";
@@ -861,7 +1313,7 @@ func renderBootstrapSetupPage(token string) string {
 				"",
 				false
 			);
-			el("airlock_bind_address").value = airlock.bind_address || "0.0.0.0";
+			el("airlock_bind_address").value = airlock.bind_address || "127.0.0.1";
 			el("airlock_port").value = String(airlock.port || 11006);
 			el("airlock_relay").value = airlock.relay || "127.0.0.1:11000";
 			el("airlock_repository_path").value = airlock.repository_path || "repositories";
@@ -952,10 +1404,20 @@ var ErrSetupInterrupted = errors.New("bootstrap setup interrupted")
 // until the operator applies a configuration, the context is cancelled, or a
 // shutdown is requested through stop. A nil stop channel disables
 // caller-driven interruption.
-func RunBootstrapSetup(ctx context.Context, host string, port int, stop <-chan struct{}) error {
+func RunBootstrapSetup(ctx context.Context, host string, port int, profileName string, stop <-chan struct{}) error {
 	if !needsBootstrapSetup() {
 		logging.Info("Bootstrap setup already completed - continuing normal startup", nil)
 		return nil
+	}
+
+	profile, err := parseBootstrapSetupProfile(profileName)
+	if err != nil {
+		return err
+	}
+	relaySessionDefaults := readPreferredYAMLMap("config.yaml", "config.example.yaml")
+	session, err := newBootstrapSetupSession(profile, relaySessionDefaults)
+	if err != nil {
+		return err
 	}
 
 	token, err := setupToken()
@@ -980,9 +1442,16 @@ func RunBootstrapSetup(ctx context.Context, host string, port int, stop <-chan s
 
 	app.Get("/setup/defaults", func(c *fiber.Ctx) error {
 		airlockConfigPath := defaultAirlockConfigPath()
+		if profile == BootstrapSetupProfileOperator {
+			airlockConfigPath = session.airlockConfigPath
+		}
 		relayDefaults := readPreferredYAMLMap("config.yaml", "config.example.yaml")
 		airlockDefaults := readPreferredYAMLMap(airlockConfigPath, filepath.Join("..", "airlock", "config.example.yaml"))
+		if profile == BootstrapSetupProfileOperator {
+			prepareOperatorSetupDefaults(relayDefaults, airlockDefaults)
+		}
 		return c.JSON(fiber.Map{
+			"profile":           profile,
 			"relayConfig":       relayDefaults,
 			"airlockConfig":     airlockDefaults,
 			"airlockConfigPath": airlockConfigPath,
@@ -990,6 +1459,9 @@ func RunBootstrapSetup(ctx context.Context, host string, port int, stop <-chan s
 	})
 
 	app.Get("/", func(c *fiber.Ctx) error {
+		if profile == BootstrapSetupProfileOperator {
+			return c.Type("html").SendString(renderOperatorSetupPage(token))
+		}
 		return c.Type("html").SendString(renderBootstrapSetupPage(token))
 	})
 
@@ -1002,6 +1474,7 @@ func RunBootstrapSetup(ctx context.Context, host string, port int, stop <-chan s
 		airlockPath := defaultAirlockConfigPath()
 		_, airlockCfgErr := os.Stat(airlockPath)
 		return c.JSON(fiber.Map{
+			"profile":               profile,
 			"needs_setup":           needsBootstrapSetup(),
 			"bootstrap_complete":    !needsBootstrapSetup(),
 			"relay_config_exists":   relayCfgErr == nil,
@@ -1014,13 +1487,14 @@ func RunBootstrapSetup(ctx context.Context, host string, port int, stop <-chan s
 		if err := c.BodyParser(&payload); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid payload"})
 		}
-		if err := prepareBootstrapSetupPayload(&payload); err != nil {
+		if err := prepareBootstrapSetupPayloadForSession(&payload, session); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"ok": false, "error": err.Error()})
 		}
 		allowedUsers, _ := payload.RelayConfig["allowed_users"].(map[string]interface{})
 
 		return c.JSON(fiber.Map{
 			"ok":                  true,
+			"profile":             profile,
 			"relay_config_keys":   len(payload.RelayConfig),
 			"airlock_config_keys": len(payload.AirlockConfig),
 			"access_mode":         allowedUsers["mode"],
@@ -1033,7 +1507,7 @@ func RunBootstrapSetup(ctx context.Context, host string, port int, stop <-chan s
 		if err := c.BodyParser(&payload); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid payload"})
 		}
-		if err := prepareBootstrapSetupPayload(&payload); err != nil {
+		if err := prepareBootstrapSetupPayloadForSession(&payload, session); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 		}
 
@@ -1057,7 +1531,7 @@ func RunBootstrapSetup(ctx context.Context, host string, port int, stop <-chan s
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 		}
 
-		if err := writeSetupMarker(); err != nil {
+		if err := writeSetupMarkerForConfig(payload.RelayConfig); err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 		}
 
@@ -1066,7 +1540,7 @@ func RunBootstrapSetup(ctx context.Context, host string, port int, stop <-chan s
 		default:
 		}
 
-		return c.JSON(fiber.Map{"ok": true, "message": "setup saved"})
+		return c.JSON(fiber.Map{"ok": true, "message": "setup saved", "profile": profile})
 	})
 
 	app.Post("/setup/abort", func(c *fiber.Ctx) error {
@@ -1080,7 +1554,8 @@ func RunBootstrapSetup(ctx context.Context, host string, port int, stop <-chan s
 	}()
 
 	logging.Info("Bootstrap setup mode enabled - waiting for setup completion", map[string]interface{}{
-		"addr": addr,
+		"addr":    addr,
+		"profile": profile,
 	})
 
 	select {
@@ -1097,7 +1572,9 @@ func RunBootstrapSetup(ctx context.Context, host string, port int, stop <-chan s
 		return nil
 	case <-applyCh:
 		_ = app.Shutdown()
-		logging.Info("Bootstrap setup completed - continuing normal startup", nil)
+		logging.Info("Bootstrap setup completed - continuing normal startup", map[string]interface{}{
+			"profile": profile,
+		})
 		return nil
 	}
 }

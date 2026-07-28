@@ -1,8 +1,8 @@
 allowed_users:
     batch_update_on_startup: false
     last_updated: 0
-    mode: public
-    read: all_users
+    mode: invite-only
+    read: allowed_users
     repo_access_override_kinds:
         - 72
         - 73
@@ -24,7 +24,7 @@ allowed_users:
           name: Basic
           price_sats: 0
           unlimited: false
-    write: all_users
+    write: allowed_users
 content_filtering:
     image_moderation:
         check_interval_seconds: 30
@@ -204,7 +204,7 @@ external_services:
         timeout: 10000
         url: http://ollama:11434
     wallet:
-        key: f0e8592a1fa471a8460b1aad5c986249f8e1abcf80c0f36cdcb4441a639de283
+        key: ""
         name: default
         url: http://localhost:11003
 logging:
@@ -282,9 +282,11 @@ relay:
     dht_private_key: ""
     icon: http://localhost:11002/logo.png
     name: HORNETS
-    private_key: c600149fe1207dd0cf5284d0a4bd767dc192181940d2a2b08f9571445f308a02
-    public_key: 336b884334a2ad004b9b5c0d24ea727e0dfa9d9f6088d37386731611a2b38bcd
-    secret_key: hornets-secret-key
+    # Set during first-time setup. Public and DHT keys are derived automatically.
+    private_key: ""
+    public_key: ""
+    # Generated securely by first-time setup.
+    secret_key: ""
     service_tag: hornet-storage-service
     software: HORNETS
     supported_nips:
@@ -325,12 +327,11 @@ server:
             dht_pubkey: ""
 # Hyperswarm sidecar configuration
 # A single sidecar process is shared by all HORNET applications on the machine.
-# The relay starts it in persistent mode; other tools (nosis, airlock) connect to it.
 sidecar:
-    # RPC address of the sidecar process
     address: "127.0.0.1:9100"
-    # Path to the hornets-hyperswarm binary. If set, the relay will start the
-    # sidecar automatically if one is not already running.
+    # Leave blank to discover hornets-hyperswarm beside this executable, in the
+    # working directory, on PATH, or in the platform install directory.
+    # Set an explicit path only for a custom layout.
     executable: ""
-    # Mode when starting a new sidecar: "persistent" (recommended for relay)
     mode: "persistent"
+    logdir: "logs/sidecar"

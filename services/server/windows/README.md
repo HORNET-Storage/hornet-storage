@@ -4,7 +4,7 @@ Windows-specific entry point for the HORNETS relay, built as `hornet-storage.exe
 
 ## What it does
 
-- **Service mode** (started by the SCM as the `HornetsRelay` service): reports `START_PENDING`, initializes the core (config/logging/UPnP), starts the relay lifecycle, and reports `RUNNING`. The first-run bootstrap setup phase (`--bootstrap-setup`) executes inside `RUNNING` and short-circuits once the setup marker exists. `Stop`/`Shutdown` requests trigger the same graceful shutdown as SIGINT/SIGTERM on the port build (websocket drain, database cleanup, sidecar close) with `STOP_PENDING` checkpoints until complete. Lifecycle and fatal events go to the Windows Event Log (source `HornetsRelay`).
+- **Service mode** (started by the SCM as the `HornetsRelay` service): reports `START_PENDING`, initializes config and logging, starts the relay lifecycle, and reports `RUNNING`. The first-run bootstrap setup phase (`--bootstrap-setup`) executes inside `RUNNING` and short-circuits once the setup marker exists. UPnP initializes only after setup has applied and reloaded the final configuration, preventing template defaults from mapping ports prematurely. `Stop`/`Shutdown` requests trigger the same graceful shutdown as SIGINT/SIGTERM on the port build (websocket drain, database cleanup, sidecar close) with `STOP_PENDING` checkpoints until complete. Lifecycle and fatal events go to the Windows Event Log (source `HornetsRelay`).
 - **Console mode** (run from a terminal): behaves like the `services/server/port` build - same flags, same startup sequence, and Ctrl+C performs the same graceful shutdown.
 
 ## Environment resolution
@@ -17,7 +17,7 @@ Replaces the retired `start-relay.ps1` wrapper, in-process, in both modes:
 
 ## Flags
 
-Identical to the port build: `--compact`, `--profile`, `--bootstrap-setup`, `--setup-host` (default `127.0.0.1`), `--setup-port` (default `11012`). The installer registers the service with `--bootstrap-setup` so first-boot setup runs when needed and is skipped once the setup marker exists.
+Identical to the port build: `--compact`, `--profile`, `--bootstrap-setup`, `--setup-host` (default `127.0.0.1`), `--setup-port` (default `11012`), and `--setup-profile` (`nosis` or `operator`, default `nosis`). The installer intentionally registers the service with `--bootstrap-setup` and no profile override, preserving the Nosis desktop/local-relay bootstrap contract. Portable release launchers pass `--setup-profile operator` explicitly. Setup is skipped once the setup marker exists.
 
 ## Building
 

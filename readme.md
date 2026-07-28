@@ -33,183 +33,113 @@ Relay operators can select which file types and nostr features to enable in the 
 
 
 
-## ⚙️ Developer Requirements & Build Instructions
+## Run the complete relay stack
 
-### 📦 **System Requirements**
+The GitHub release archives are the normal deployment path. Each platform archive contains:
 
-To build and run HORNETS-Nostr-Relay from source, ensure the following tools are installed:
+- `hornets-relay`, Airlock, and the platform-matched hyperswarm sidecar.
+- Native sidecar prebuilds.
+- The version-matched relay web panel.
+- Relay and Airlock example configuration.
+- `start.bat` for Windows and `start.sh` for Linux/macOS.
+- Docker runtime assets and a build manifest containing all source revisions.
 
-✅ **Go 1.22+**
-Official Go programming language environment. Download from:
-[https://golang.org/dl/](https://golang.org/dl/)
+Extract one archive, keep its directory structure intact, and run:
 
-✅ **GCC (GNU Compiler Collection)**
-Required for building C-based dependencies via `cgo`.
-
-----
-
-#### If On **Linux or Debian** Then Run:
-
-  ```bash
-  sudo apt update
-  sudo apt install build-essential
-  ```
-
-#### If On **macOS** Then Run:
-
-  ```bash
-  xcode-select --install
-  ```
-
-#### If On **Windows** Then Run:
-  Recommended: [MSYS2](https://www.msys2.org/)
-
-  ```bash
-  pacman -S base-devel gcc
-  ```
-
-  Alternatively: [MinGW-w64](https://www.mingw-w64.org/downloads/)
-
----
-
-### 🚀 **QUICK SETUP: Building Relay with Panel** (Production Mode)
-
-After cloning the repository,
-
-```bash
-git clone https://github.com/HORNET-Storage/HORNETS-Nostr-Relay.git
-cd HORNETS-Nostr-Relay
-```
-
-**Optional:** To change the server port, copy and edit `config.example.yaml` before building:
-```bash
-cp config.example.yaml config.yaml
-# Edit config.yaml and change the port value under server:
-```
-
-#### On **Linux or macOS**:
-
-*Run this script found in the main directory:*
-```bash
-./build-panel.sh
-```
-
-#### On **Windows**:
-
-*Run this script found in the main directory:*
 ```powershell
-.\build-panel.bat
+.\start.bat
 ```
 
-The compiled binary (hornet-storage or hornet-storage.exe) will be created in the project root directory.
-
-**📌 Port Info:** The web panel runs on **base port +2**. The default base port is `11000`, so the panel will be at `http://localhost:11002`. (Base port can be changed by renaming `config.example.yaml` to `config.yaml` before building, or by editing the auto-generated `config.yaml` after the first build.)
-
----
-
-
-### 🚀 **Building Relay with Panel** (Hot Reload Dev Mode)
-
-Use this mode when modifying the panel source code in `/panel-source`.
-
-After cloning the repository,
+or:
 
 ```bash
-git clone https://github.com/HORNET-Storage/HORNETS-Nostr-Relay.git
-cd HORNETS-Nostr-Relay
+chmod +x start.sh
+./start.sh
 ```
 
-**Optional:** To change the server port, copy and edit `config.example.yaml` before building:
+The launcher starts the relay first. On a new installation it waits for the first-run setup to create the relay and Airlock configuration, then starts Airlock. It supervises only the processes it started and cleans them up on exit.
+
+Open `http://127.0.0.1:11012` for first-run setup. The setup port is loopback-only in the supplied launchers and Compose files. The default relay endpoints are `11000` and `11002`; Airlock's optional HTTP endpoint is configured for loopback on `11006` and is not published by the Docker configuration.
+
+### Configuration contract
+
+The standard release layout is:
+
+```text
+hornets-relay-<platform>/
+├── bin/
+│   ├── hornets-relay
+│   ├── airlock
+│   ├── hornets-hyperswarm
+│   └── prebuilds/
+├── relay/
+│   ├── config.example.yaml
+│   └── web/
+├── airlock/
+│   └── config.example.yaml
+├── start.bat
+├── start.sh
+└── README.md
+```
+
+No private key or executable path is copied between processes:
+
+- The relay owns the relay Nostr identity.
+- Airlock uses its explicit `private_key` when configured; otherwise it reads the relay key through `relay_config_path` and derives an Airlock-specific, domain-separated DHT seed. The raw relay key is not copied or reused directly as an Ed25519 seed.
+- The shared Go client discovers a sidecar beside the caller, in the working directory, on `PATH`, or in standard Hornet Storage install locations.
+- Explicit config and environment values always take precedence, preserving standalone and service deployments.
+
+Generated configuration contains secrets. Restrict it to the service account and do not commit it.
+
+## Docker
+
+From a `linux-amd64` release archive:
+
 ```bash
-cp config.example.yaml config.yaml
-# Edit config.yaml and change the port value under server:
+docker compose up -d
 ```
 
-#### On **Linux or macOS**:
+From the sibling source checkout (`hornets-suite/hornets-nostr-relay`, `airlock`, `nosis-cli`, `hornets-hyperswarm`, and `hornets-relay-panel`):
 
-*Run this script found in the main directory:*
 ```bash
-./build-panel-devmode.sh
+./docker/build.sh
+docker compose up -d
 ```
 
-#### On **Windows**:
+On Windows use `docker\build.bat`, then `docker compose up -d`. Persistent relay and Airlock data live in named volumes. The setup UI is mapped only to `127.0.0.1:11012`. Operators who need inbound DHT/UDP behavior beyond Docker bridge networking should configure host networking or explicit deployment-specific networking deliberately.
 
-*Run this script found in the main directory:*
+## Build the complete stack from source
+
+Requirements: Go 1.24+, a C compiler for CGO, Git, Node.js 22+, npm 11.10+, Corepack, and Yarn Classic. Keep Airlock, Nosis CLI, hyperswarm, and the relay panel as sibling repositories because the development build uses the local checked-out sources.
+
+Linux/macOS:
+
+```bash
+./build-stack.sh
+```
+
+Windows:
+
 ```powershell
-.\build-panel-devmode.bat
+.\build-stack.bat
 ```
 
-The compiled binary (`hornet-storage` or `hornet-storage.exe`) will be created in the project root directory.
+The development bundle is written to `dist/hornets-relay-dev` with the same layout as a release archive. Individual relay-only build scripts remain available for standalone development and the existing service installer continues to use its explicit configuration paths.
 
-**📌 Port Info:** In dev mode, the React dev server runs on **base port +3**. The default base port is `11000`, so access the panel at `http://localhost:11003`. (Base port can be changed by renaming `config.example.yaml` to `config.yaml` before building, or by editing the auto-generated `config.yaml` after the first build.)
+## Release workflow
 
----
+Pushing a `v*` tag runs `.github/workflows/release.yml`. It checks out the matching component repositories, builds each binary and the relay panel natively on Linux x64, Windows x64, and macOS Intel, validates the complete runtime layout, and publishes ready-to-extract archives with SHA-256 checksum files. If sibling repositories are private, configure `HORNETS_REPO_TOKEN` with read access; public repositories can use the workflow token.
 
-### 🚀 **Building Relay without Panel**
+Manual workflow runs build and retain the archives without publishing a GitHub release. Component refs are explicit inputs so a release can pin reviewed Airlock, hyperswarm, Nosis CLI, and relay-panel revisions.
 
-After cloning the repository,
+## Additional services
 
-```bash
-git clone https://github.com/HORNET-Storage/HORNETS-Nostr-Relay.git
-cd HORNETS-Nostr-Relay
-```
+The relay can also integrate with:
 
-##### If On **Linux or macOS** Then Run:
+- [Super Neutrino Wallet](https://github.com/HORNET-Storage/Super-Neutrino-Wallet) for paid relay features.
+- [NestShield](https://github.com/HORNET-Storage/NestShield) for content moderation.
+- [Ollama](https://ollama.com/download) for advanced local moderation.
 
-*Run this script found in the main directory:*
-```bash
-./build.sh
-```
+## Security and verification
 
-##### If On **Windows** Then Run:
-
-*Run this script found in the main directory:*
-```powershell
-.\build.bat
-```
-
-The compiled binary (`hornet-storage` or `hornet-storage.exe`) will be created in the project root directory.
-
----
-
-### 🔑 **Configuration Setup**
-
-On first run the relay will automatically generate a config.yaml with a default configuration and a new private key which makes getting started nice and easy.
-
-There are also example configs included for specific situations.
-The config.example.dev has all content moderation disabled and allows all kinds and users with no restrictions.
-
-You can copy and rename manually or use the following if you wish to use any of the example configurations.
-
-#### **Bash**
-```bash
-cp config.example.dev.yaml config.yaml
-```
-
-#### **Powershell**
-```powershell
-copy config.example.dev.yaml config.yaml
-```
-
-If copying an example config make sure to update the private key.
-
-Set the `private_key` field to a valid Nostr private key in either **nsec bech32 format** or **hexadecimal format**. This key identifies your relay on the Nostr network and is required for operation.
-
-
-### Additional Services
-
-The relay is designed to run with optional services along side it and those can be found here:
-
-[Super Neutrino Wallet](https://github.com/HORNET-Storage/Super-Neutrino-Wallet)
-- Paid relay features using a bitcoin wallet
-
-[NestShield](https://github.com/HORNET-Storage/NestShield)
-- Content moderation using python
-
-[Ollama](https://ollama.com/download)
-- More advanced and resource intensive content moderation
-
----
-
-## Disclaimer ##
-**WARNING**: Relay is still being developed and is not ready for production use yet. More details will be provided soon.
+Bundling changes process discovery and deployment ergonomics only. Airlock remains the verification boundary for repository pushes and pulls; authentication, signatures, permissions, DAG verification, and relay/Airlock trust rules are unchanged. The relay and Airlock can still run separately, can use separate identities, and can connect to an externally managed persistent sidecar.

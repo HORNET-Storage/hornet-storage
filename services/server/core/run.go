@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -112,6 +113,9 @@ type Options struct {
 	SetupHost string
 	// SetupPort is the port for the first-time setup server.
 	SetupPort int
+	// SetupProfile selects the server-owned bootstrap policy. Empty keeps the
+	// established Nosis desktop/local-relay behavior.
+	SetupProfile string
 	// Stop triggers a graceful shutdown when it is closed. Console
 	// entrypoints wire it to SIGINT/SIGTERM; the Windows service entrypoint
 	// wires it to SCM stop requests. A nil channel disables caller-driven
@@ -119,9 +123,9 @@ type Options struct {
 	Stop <-chan struct{}
 }
 
-// Initialize prepares the relay's process-wide state: configuration, logging,
-// and the UPnP subsystem when enabled. Entrypoints must parse command-line
-// flags before calling Initialize, and must call it exactly once before Run.
+// Initialize prepares the relay's process-wide configuration and logging state.
+// UPnP is initialized inside Run only after first-time setup has applied and the
+// final configuration has been reloaded.
 func Initialize() {
 	// Initialze config system
 	err := config.InitConfig()
@@ -139,40 +143,45 @@ func Initialize() {
 		"version": viper.GetString("relay.version"),
 		"name":    viper.GetString("relay.name"),
 	})
+}
+
+func initializeUPnP() {
+	if !viper.GetBool("server.upnp") {
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Initialze upnp system if enabled
-	if viper.GetBool("server.upnp") {
-		upnpManager, err := upnp.Init(ctx)
-		if err != nil {
-			logging.Error("UPnP init failed", map[string]interface{}{
-				"error": err,
-			})
-			return
-		}
-		if upnpManager == nil {
-			logging.Error("UPnP init failed", map[string]interface{}{
-				"error": "no UPnP router discovered",
-			})
-			return
-		}
+	upnpManager, err := upnp.Init(ctx)
+	if err != nil {
+		logging.Error("UPnP init failed", map[string]interface{}{
+			"error": err,
+		})
+		return
+	}
+	if upnpManager == nil {
+		logging.Error("UPnP init failed", map[string]interface{}{
+			"error": "no UPnP router discovered",
+		})
+		return
+	}
 
-		ip, err := upnpManager.ExternalIP()
-		if err == nil {
-			logging.Info("UPnP External IP", map[string]interface{}{
-				"ip": ip,
-			})
-		} else {
-			logging.Error("Failed to get UPnP external IP", map[string]interface{}{
-				"error": err,
-			})
-		}
+	ip, err := upnpManager.ExternalIP()
+	if err == nil {
+		logging.Info("UPnP External IP", map[string]interface{}{
+			"ip": ip,
+		})
+	} else {
+		logging.Error("Failed to get UPnP External IP", map[string]interface{}{
+			"error": err,
+		})
 	}
 }
 
-func deriveAirlockDHTPublicKeyFromPrivateKey(privateKey string) (string, error) {
+const airlockRelayIdentityDomain = "hornets-airlock-dht-v1\x00"
+
+func deriveAirlockDHTPublicKeyFromPrivateKey(privateKey string, domainSeparated bool) (string, error) {
 	privateKeyBytes, err := signing.DecodeKey(strings.TrimSpace(privateKey))
 	if err != nil {
 		return "", fmt.Errorf("invalid Airlock private key: %w", err)
@@ -182,7 +191,16 @@ func deriveAirlockDHTPublicKeyFromPrivateKey(privateKey string) (string, error) 
 		return "", fmt.Errorf("invalid Airlock private key length: expected %d bytes, got %d", ed25519.SeedSize, len(privateKeyBytes))
 	}
 
-	ed25519PrivateKey := ed25519.NewKeyFromSeed(privateKeyBytes)
+	dhtSeed := privateKeyBytes
+	if domainSeparated {
+		material := make([]byte, 0, len(airlockRelayIdentityDomain)+len(privateKeyBytes))
+		material = append(material, airlockRelayIdentityDomain...)
+		material = append(material, privateKeyBytes...)
+		digest := sha256.Sum256(material)
+		dhtSeed = digest[:]
+	}
+
+	ed25519PrivateKey := ed25519.NewKeyFromSeed(dhtSeed)
 	ed25519PublicKey := ed25519PrivateKey.Public().(ed25519.PublicKey)
 	return hex.EncodeToString(ed25519PublicKey), nil
 }
@@ -190,16 +208,21 @@ func deriveAirlockDHTPublicKeyFromPrivateKey(privateKey string) (string, error) 
 func syncAirlockServiceDHTPubkey() (string, error) {
 	airlockConfigPath := defaultAirlockConfigPath()
 	airlockConfig := readYAMLMap(airlockConfigPath)
-	if len(airlockConfig) == 0 {
-		return "", fmt.Errorf("airlock config not found at %s", airlockConfigPath)
-	}
 
-	privateKey := strings.TrimSpace(fmt.Sprint(airlockConfig["private_key"]))
+	privateKey := stringSetting(airlockConfig["private_key"])
+	domainSeparated := false
 	if privateKey == "" {
-		return "", fmt.Errorf("airlock private_key missing in %s", airlockConfigPath)
+		// The default deployment deliberately avoids duplicating the relay secret.
+		// Derive a separate Airlock DHT seed so raw relay key bytes are never reused
+		// across the relay's secp256k1 and Airlock's ed25519 contexts.
+		privateKey = strings.TrimSpace(viper.GetString("relay.private_key"))
+		domainSeparated = true
+	}
+	if privateKey == "" {
+		return "", fmt.Errorf("Airlock private_key is empty in %s and relay.private_key is unavailable", airlockConfigPath)
 	}
 
-	return deriveAirlockDHTPublicKeyFromPrivateKey(privateKey)
+	return deriveAirlockDHTPublicKeyFromPrivateKey(privateKey, domainSeparated)
 }
 
 func forwardSidecarDHTPort(client *hsClient.Client) func() {
@@ -272,7 +295,7 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	if opts.BootstrapSetup {
-		if err := RunBootstrapSetup(ctx, opts.SetupHost, opts.SetupPort, opts.Stop); err != nil {
+		if err := RunBootstrapSetup(ctx, opts.SetupHost, opts.SetupPort, opts.SetupProfile, opts.Stop); err != nil {
 			if errors.Is(err, ErrSetupInterrupted) {
 				logging.Info("Bootstrap setup interrupted by shutdown request - exiting", nil)
 				return nil
@@ -289,6 +312,10 @@ func Run(ctx context.Context, opts Options) error {
 			logging.Fatalf("Failed to reload config after bootstrap setup: %v", err)
 		}
 	}
+
+	// Setup may have changed UPnP. Initialize it only from the final reloaded
+	// configuration so operator mode never maps ports from template defaults.
+	initializeUPnP()
 
 	serializedPrivateKey := viper.GetString("relay.private_key")
 
@@ -340,8 +367,7 @@ func Run(ctx context.Context, opts Options) error {
 			configNeedsSave = true
 
 			logging.Info("Generated new server keys", map[string]interface{}{
-				"private_key": serializedPrivateKey,
-				"public_key":  serializedPublicKey,
+				"public_key": serializedPublicKey,
 			})
 		}
 	}
@@ -354,9 +380,7 @@ func Run(ctx context.Context, opts Options) error {
 			logging.Errorf("Failed to migrate legacy relay.dht_key to relay.dht_seed: %v", err)
 		} else {
 			configNeedsSave = true
-			logging.Info("Migrated legacy relay DHT seed configuration", map[string]interface{}{
-				"dht_seed": dhtSeed,
-			})
+			logging.Info("Migrated legacy relay DHT seed configuration", nil)
 		}
 	}
 	if legacyDHTSeed != "" {
@@ -378,9 +402,7 @@ func Run(ctx context.Context, opts Options) error {
 				logging.Errorf("Failed to save derived relay DHT seed: %v", err)
 			} else {
 				configNeedsSave = true
-				logging.Info("Generated new relay DHT seed from private key", map[string]interface{}{
-					"dht_seed": dhtSeed,
-				})
+				logging.Info("Generated new relay DHT seed from private key", nil)
 			}
 		}
 	} else {
@@ -407,9 +429,7 @@ func Run(ctx context.Context, opts Options) error {
 				logging.Errorf("Failed to save relay DHT private key: %v", err)
 			} else {
 				configNeedsSave = true
-				logging.Info("Updated relay DHT private key in configuration", map[string]interface{}{
-					"dht_private_key": dhtIdentity.PrivateKey,
-				})
+				logging.Info("Updated relay DHT private key in configuration", nil)
 			}
 		}
 	}
@@ -442,9 +462,7 @@ func Run(ctx context.Context, opts Options) error {
 			config.UpdateConfig("external_services.wallet.key", newAPIKey, true)
 			configNeedsSave = true
 
-			logging.Info("Generated new wallet API key", map[string]interface{}{
-				"wallet_api_key": newAPIKey,
-			})
+			logging.Info("Generated new wallet API key", nil)
 		}
 	}
 

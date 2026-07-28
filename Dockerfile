@@ -1,37 +1,61 @@
-# === Stage 1: Build React Panel ===
-FROM node:18-alpine AS panel-builder
+# Build context must be the hornets-suite directory so the local Go module
+# replacements and the three sibling source repositories are available.
+FROM node:24-bookworm AS sidecar-builder
 
-WORKDIR /panel
+WORKDIR /src/hornets-hyperswarm
+COPY hornets-hyperswarm/ ./
+RUN npm install --global npm@11.10.0 \
+    && if [ -f package-lock.json ]; then npm ci; else npm install; fi \
+    && npm run build
 
-COPY HORNETS-Relay-Panel/package.json HORNETS-Relay-Panel/yarn.lock ./
-RUN yarn install --frozen-lockfile
+FROM node:24-bookworm AS panel-builder
 
-COPY HORNETS-Relay-Panel/ ./
-RUN yarn build
+WORKDIR /src/hornets-relay-panel
+COPY hornets-relay-panel/ ./
+RUN corepack enable \
+    && corepack prepare yarn@1.22.22 --activate \
+    && yarn install --frozen-lockfile \
+    && yarn build
 
-# === Stage 2: Build Go Relay ===
-FROM golang:1.23-alpine AS relay-builder
+FROM golang:1.24-bookworm AS go-builder
 
-WORKDIR /app
-RUN apk add --no-cache git gcc musl-dev
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential git \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY HORNETS-Nostr-Relay/go.mod HORNETS-Nostr-Relay/go.sum ./
-RUN go mod download
+WORKDIR /src
+COPY hornets-nostr-relay/ hornets-nostr-relay/
+COPY airlock/ airlock/
+COPY nosis-cli/ nosis-cli/
+COPY hornets-hyperswarm/ hornets-hyperswarm/
 
-COPY HORNETS-Nostr-Relay/ ./
-RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o relay ./services/server/port
+RUN mkdir -p /out/bin \
+    && cd /src/hornets-nostr-relay \
+    && CGO_ENABLED=1 go build -buildvcs=false -trimpath -o /out/bin/hornets-relay ./services/server/port \
+    && cd /src/airlock \
+    && CGO_ENABLED=1 go build -buildvcs=false -trimpath -o /out/bin/airlock .
 
-# === Stage 3: Final Minimal Runtime Image ===
-FROM alpine:latest
+FROM debian:bookworm-slim
 
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup && apk add --no-cache ca-certificates chromium
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 10001 hornets
 
-WORKDIR /app
-COPY --from=relay-builder /app/relay ./
-COPY --from=panel-builder /panel/build ./web
+WORKDIR /opt/hornets
+COPY --from=go-builder /out/bin/ ./bin/
+COPY --from=sidecar-builder /src/hornets-hyperswarm/dist/hornets-hyperswarm ./bin/hornets-hyperswarm
+COPY --from=sidecar-builder /src/hornets-hyperswarm/dist/prebuilds ./bin/prebuilds
+COPY hornets-nostr-relay/config.example.yaml ./relay/config.example.yaml
+COPY --from=panel-builder /src/hornets-relay-panel/build/ ./relay/web/
+COPY airlock/config.example.yaml ./airlock/config.example.yaml
+COPY hornets-nostr-relay/release/bundle/docker/entrypoint.sh ./entrypoint.sh
 
-RUN mkdir -p /app/data /app/temp /app/statistics && chown -R appuser:appgroup /app
+RUN chmod 0755 ./bin/hornets-relay ./bin/airlock ./bin/hornets-hyperswarm ./entrypoint.sh \
+    && mkdir -p /data/relay /data/airlock \
+    && chown -R hornets:hornets /opt/hornets /data
 
-USER appuser
-
-CMD ["./relay"]
+USER hornets
+VOLUME ["/data/relay", "/data/airlock"]
+EXPOSE 11000 11002 11006 11007 11012
+ENTRYPOINT ["/opt/hornets/entrypoint.sh"]

@@ -1,5 +1,3 @@
-# Backward-compatible alias for docker-compose.yml.
-# Run from this directory with: docker compose -f docker-compose.relay.yml up --build
 services:
   hornets-relay:
     build:
@@ -10,7 +8,6 @@ services:
     ports:
       - "11000:11000"
       - "11002:11002"
-      # The first-run setup UI is intentionally exposed only on the host loopback.
       - "127.0.0.1:11012:11012"
     volumes:
       - relay-data:/data/relay

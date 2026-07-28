@@ -1,0 +1,12 @@
+**
+!bin/
+!bin/**
+!relay/
+!relay/config.example.yaml
+!relay/web/
+!relay/web/**
+!airlock/
+!airlock/config.example.yaml
+!docker/
+!docker/Dockerfile
+!docker/entrypoint.sh
