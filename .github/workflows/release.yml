@@ -31,30 +31,15 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: ${{ matrix.asset }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            asset: linux-amd64
-            executable_suffix: ""
-            archive: tar
-          - os: windows-2022
-            asset: windows-amd64
-            executable_suffix: .exe
-            archive: zip
-          - os: macos-15-intel
-            asset: macos-amd64
-            executable_suffix: ""
-            archive: tar
-          - os: macos-15
-            asset: macos-arm64
-            executable_suffix: ""
-            archive: tar
-    runs-on: ${{ matrix.os }}
-
+  resolve-sources:
+    name: Resolve immutable source revisions
+    runs-on: ubuntu-24.04
+    outputs:
+      relay_sha: ${{ steps.revisions.outputs.relay }}
+      airlock_sha: ${{ steps.revisions.outputs.airlock }}
+      hyperswarm_sha: ${{ steps.revisions.outputs.hyperswarm }}
+      nosis_cli_sha: ${{ steps.revisions.outputs.nosis_cli }}
+      relay_panel_sha: ${{ steps.revisions.outputs.relay_panel }}
     steps:
       - name: Check out relay
         uses: actions/checkout@v4
@@ -93,6 +78,81 @@ jobs:
           token: ${{ secrets.HORNETS_REPO_TOKEN || github.token }}
           path: sources/hornets-relay-panel
 
+      - name: Record resolved revisions
+        id: revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "relay=$(git -C sources/hornets-nostr-relay rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "airlock=$(git -C sources/airlock rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "hyperswarm=$(git -C sources/hornets-hyperswarm rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "nosis_cli=$(git -C sources/nosis-cli rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "relay_panel=$(git -C sources/hornets-relay-panel rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.asset }}
+    needs: resolve-sources
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            asset: linux-amd64
+            executable_suffix: ""
+            archive: tar
+          - os: windows-2022
+            asset: windows-amd64
+            executable_suffix: .exe
+            archive: zip
+          - os: macos-15-intel
+            asset: macos-amd64
+            executable_suffix: ""
+            archive: tar
+          - os: macos-15
+            asset: macos-arm64
+            executable_suffix: ""
+            archive: tar
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Check out relay
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-sources.outputs.relay_sha }}
+          path: sources/hornets-nostr-relay
+
+      - name: Check out Airlock
+        uses: actions/checkout@v4
+        with:
+          repository: HORNET-Storage/airlock
+          ref: ${{ needs.resolve-sources.outputs.airlock_sha }}
+          token: ${{ secrets.HORNETS_REPO_TOKEN || github.token }}
+          path: sources/airlock
+
+      - name: Check out hyperswarm sidecar
+        uses: actions/checkout@v4
+        with:
+          repository: HORNET-Storage/hornets-hyperswarm
+          ref: ${{ needs.resolve-sources.outputs.hyperswarm_sha }}
+          token: ${{ secrets.HORNETS_REPO_TOKEN || github.token }}
+          path: sources/hornets-hyperswarm
+
+      - name: Check out Nosis CLI library
+        uses: actions/checkout@v4
+        with:
+          repository: HORNET-Storage/nosis-cli
+          ref: ${{ needs.resolve-sources.outputs.nosis_cli_sha }}
+          token: ${{ secrets.HORNETS_REPO_TOKEN || github.token }}
+          path: sources/nosis-cli
+
+      - name: Check out relay panel
+        uses: actions/checkout@v4
+        with:
+          repository: HORNET-Storage/HORNETS-Relay-Panel
+          ref: ${{ needs.resolve-sources.outputs.relay_panel_sha }}
+          token: ${{ secrets.HORNETS_REPO_TOKEN || github.token }}
+          path: sources/hornets-relay-panel
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -120,7 +180,7 @@ jobs:
         working-directory: sources/hornets-hyperswarm
         run: |
           set -euo pipefail
-          if [[ -f package-lock.json ]]; then npm ci; else npm install; fi
+          npm ci
           npm run build
 
       - name: Build relay panel
@@ -131,7 +191,7 @@ jobs:
         run: |
           set -euo pipefail
           corepack enable
-          corepack prepare yarn@1.22.22 --activate
+          corepack prepare yarn@1.22.19 --activate
           yarn install --frozen-lockfile
           yarn lessc --js --clean-css="--s1 --advanced" src/styles/themes/main.less public/themes/main.css
           yarn craco build
@@ -148,6 +208,23 @@ jobs:
           cp "sources/hornets-hyperswarm/dist/hornets-hyperswarm${EXE}" "build/bin/hornets-hyperswarm${EXE}"
           cp -R sources/hornets-hyperswarm/dist/prebuilds build/bin/prebuilds
 
+      - name: Generate license, notice, source, and asset inventories
+        shell: bash
+        env:
+          ASSET: ${{ matrix.asset }}
+        run: |
+          set -euo pipefail
+          node sources/hornets-nostr-relay/scripts/compliance/generate.mjs \
+            --workspace sources \
+            --output build/compliance \
+            --artifact "hornets-relay-${ASSET}" \
+            --relay-revision "${{ needs.resolve-sources.outputs.relay_sha }}" \
+            --airlock-revision "${{ needs.resolve-sources.outputs.airlock_sha }}" \
+            --hyperswarm-revision "${{ needs.resolve-sources.outputs.hyperswarm_sha }}" \
+            --nosis-cli-revision "${{ needs.resolve-sources.outputs.nosis_cli_sha }}" \
+            --panel-revision "${{ needs.resolve-sources.outputs.relay_panel_sha }}" \
+            --require-immutable-sources
+
       - name: Assemble release directory
         shell: bash
         env:
@@ -158,15 +235,16 @@ jobs:
           mkdir -p "package/${bundle}/relay/web" "package/${bundle}/airlock"
           cp -R sources/hornets-nostr-relay/release/bundle/. "package/${bundle}/"
           cp -R build/bin "package/${bundle}/bin"
+          cp -R build/compliance "package/${bundle}/compliance"
           cp sources/hornets-nostr-relay/config.example.yaml "package/${bundle}/relay/config.example.yaml"
           cp sources/airlock/config.example.yaml "package/${bundle}/airlock/config.example.yaml"
           cp -R sources/hornets-relay-panel/build/. "package/${bundle}/relay/web/"
           {
-            echo "Relay: $(git -C sources/hornets-nostr-relay rev-parse HEAD)"
-            echo "Airlock: $(git -C sources/airlock rev-parse HEAD)"
-            echo "Hyperswarm: $(git -C sources/hornets-hyperswarm rev-parse HEAD)"
-            echo "Nosis CLI: $(git -C sources/nosis-cli rev-parse HEAD)"
-            echo "Relay panel: $(git -C sources/hornets-relay-panel rev-parse HEAD)"
+            echo "Relay: ${{ needs.resolve-sources.outputs.relay_sha }}"
+            echo "Airlock: ${{ needs.resolve-sources.outputs.airlock_sha }}"
+            echo "Hyperswarm: ${{ needs.resolve-sources.outputs.hyperswarm_sha }}"
+            echo "Nosis CLI: ${{ needs.resolve-sources.outputs.nosis_cli_sha }}"
+            echo "Relay panel: ${{ needs.resolve-sources.outputs.relay_panel_sha }}"
           } > "package/${bundle}/BUILD-METADATA.txt"
           test -f "package/${bundle}/README.md"
           test -f "package/${bundle}/start.sh"
@@ -176,29 +254,36 @@ jobs:
           test -f "package/${bundle}/bin/hornets-hyperswarm${{ matrix.executable_suffix }}"
           test -d "package/${bundle}/bin/prebuilds"
           test -f "package/${bundle}/relay/web/index.html"
+          node sources/hornets-nostr-relay/scripts/compliance/verify.mjs "package/${bundle}" --require-immutable-sources
 
-      - name: Create tar archive
+      - name: Create and verify tar archive
         if: matrix.archive == 'tar'
         shell: bash
         env:
           ASSET: ${{ matrix.asset }}
         run: |
           set -euo pipefail
-          mkdir -p release-assets
+          mkdir -p release-assets verify-archive
           archive="hornets-relay-${ASSET}.tar.gz"
-          tar -C package -czf "release-assets/${archive}" "hornets-relay-${ASSET}"
+          bundle="hornets-relay-${ASSET}"
+          tar -C package -czf "release-assets/${archive}" "${bundle}"
           (cd release-assets && sha256sum "${archive}" > "${archive}.sha256")
+          tar -C verify-archive -xzf "release-assets/${archive}"
+          node sources/hornets-nostr-relay/scripts/compliance/verify.mjs "verify-archive/${bundle}" --require-immutable-sources
 
-      - name: Create zip archive
+      - name: Create and verify zip archive
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force release-assets | Out-Null
-          $archiveName = "hornets-relay-${{ matrix.asset }}.zip"
+          New-Item -ItemType Directory -Force release-assets, verify-archive | Out-Null
+          $bundle = "hornets-relay-${{ matrix.asset }}"
+          $archiveName = "$bundle.zip"
           $archivePath = Join-Path 'release-assets' $archiveName
-          Compress-Archive -Path "package/hornets-relay-${{ matrix.asset }}" -DestinationPath $archivePath -Force
+          Compress-Archive -Path "package/$bundle" -DestinationPath $archivePath -Force
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
           "$hash  $archiveName" | Set-Content -Encoding ascii -LiteralPath "$archivePath.sha256"
+          Expand-Archive -LiteralPath $archivePath -DestinationPath verify-archive -Force
+          node sources/hornets-nostr-relay/scripts/compliance/verify.mjs "verify-archive/$bundle" --require-immutable-sources
 
       - name: Upload release archive
         uses: actions/upload-artifact@v4

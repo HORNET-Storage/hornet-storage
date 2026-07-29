@@ -1,0 +1,42 @@
+{
+  "npm:noise-curve-ed@2.1.0": {
+    "license": "ISC",
+    "upstreamLicenseExpression": "ISC",
+    "notice": "Copyright (c) the upstream authors and contributors of noise-curve-ed",
+    "upstreamRevision": "759e631531bb64e32428b5684fc615758ae806f5",
+    "evidence": "https://registry.npmjs.org/noise-curve-ed/2.1.0",
+    "rationale": "The exact npm manifest declares ISC, but its immutable published archive and referenced source revision omit a standalone license text and copyright notice."
+  },
+  "npm:qj@2.0.0": {
+    "license": "MIT",
+    "upstreamLicenseExpression": "MIT",
+    "notice": "Copyright (c) Jesse Pollak",
+    "upstreamRevision": "29b850123579eb4c4cec3b01da274998004731b9",
+    "evidence": "https://registry.npmjs.org/qj/2.0.0",
+    "rationale": "The exact npm manifest declares MIT and identifies Jesse Pollak as author, but its immutable published archive and referenced source revision omit a standalone license text."
+  },
+  "npm:size-sensor@1.0.2": {
+    "license": "ISC",
+    "upstreamLicenseExpression": "ISC",
+    "notice": "Copyright (c) hustcc",
+    "upstreamRevision": "e5cbb27b591af7e4695f0b63600c548d08c9f732",
+    "evidence": "https://registry.npmjs.org/size-sensor/1.0.2",
+    "rationale": "The exact npm manifest declares ISC and its README states ISC@hustcc, but the immutable published archive and referenced source revision omit the complete ISC text."
+  },
+  "npm:toggle-selection@1.0.6": {
+    "license": "MIT",
+    "upstreamLicenseExpression": "MIT",
+    "notice": "Copyright (c) sudodoki and contributors",
+    "upstreamRevision": "466460c75ca40630d8de940490718247fce79a3e",
+    "evidence": "https://registry.npmjs.org/toggle-selection/1.0.6",
+    "rationale": "The exact npm manifest declares MIT and identifies sudodoki as author, but its immutable published archive and referenced source revision omit a standalone license text."
+  },
+  "go:github.com/multiformats/go-base36@v0.2.0": {
+    "license": "MIT",
+    "upstreamLicenseExpression": "Apache-2.0 OR MIT",
+    "notice": "Copyright (c) Protocol Labs",
+    "upstreamRevision": "da52c98bb97cfaa321be04030bc97dcee7de63ff",
+    "evidence": "https://raw.githubusercontent.com/multiformats/go-base36/da52c98bb97cfaa321be04030bc97dcee7de63ff/LICENSE.md",
+    "rationale": "The exact module license grants a choice of Apache-2.0 or MIT through the Protocol Labs Permissive License Stack. This distribution elects MIT and supplies the complete MIT terms."
+  }
+}

@@ -48,6 +48,12 @@ func handleReqMessage(c *websocket.Conn, env *nostr.ReqEnvelope, state *connecti
 		}
 
 		write := func(messageType string, params ...interface{}) {
+			flat := lib_nostr.ExtractInterfaceValues(params)
+			if messageType == "CLOSED" && len(flat) > 0 {
+				if subID, _ := flat[0].(string); subID == env.SubscriptionID {
+					removeListenerId(c, subID)
+				}
+			}
 			response := lib_nostr.BuildResponse(messageType, params)
 			if len(response) > 0 {
 				handleIncomingMessage(c, response)

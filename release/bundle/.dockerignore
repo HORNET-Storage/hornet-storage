@@ -7,6 +7,9 @@
 !relay/web/**
 !airlock/
 !airlock/config.example.yaml
+!compliance/
+!compliance/**
+!BUILD-METADATA.txt
 !docker/
 !docker/Dockerfile
 !docker/entrypoint.sh

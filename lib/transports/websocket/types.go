@@ -1,14 +1,6 @@
 package websocket
 
-import (
-	"context"
-	"encoding/json"
-	"time"
-
-	"github.com/gofiber/contrib/websocket"
-	"github.com/nbd-wtf/go-nostr"
-	"github.com/puzpuzpuz/xsync/v3"
-)
+import "time"
 
 // TODO: maybe we should move this into a different package since we use it in the sync package as well
 // It certainly shouldn't be here, that's for sure
@@ -62,34 +54,4 @@ type HornetExtension struct {
 	DHTPubkey   string    `json:"dht_pubkey"`
 	Signature   string    `json:"signature"`
 	LastUpdated time.Time `json:"last_updated"`
-}
-
-type Message struct {
-	MessageType string          `json:"messageType"`
-	Event       json.RawMessage `json:"event"`
-}
-
-type ReqEnvelope struct {
-	SubscriptionID string
-	nostr.Filter
-}
-
-type Event interface {
-	HandleEvent(c *websocket.Conn, ctx context.Context) error
-}
-
-type Subscription struct {
-	filters nostr.Filters
-	cancel  context.CancelFunc
-}
-
-type ListenerData struct {
-	authenticated bool
-	pubkey        string
-	challenge     string
-	subscriptions *xsync.MapOf[string, *Subscription]
-}
-
-type EventMessage struct {
-	Event nostr.Event // Adapted for the specific event structure you're using
 }

@@ -106,26 +106,15 @@ echo
 echo "Starting panel dev server (dev mode)..."
 cd "$PANEL_DIR"
 
-# Install deps (Yarn preferred, fallback to npm)
-if command -v yarn >/dev/null 2>&1; then
-  yarn install || echo "WARNING: yarn install reported issues."
-else
-  npm install || echo "WARNING: npm install reported issues."
-fi
+# Install exactly the repository-pinned dependency graph.
+corepack enable
+corepack prepare yarn@1.22.19 --activate
+yarn install --frozen-lockfile
 
 # Create themes directory if it doesn't exist and build themes
 echo "Building themes for development..."
 mkdir -p "public/themes"
-node_modules/.bin/lessc --js --clean-css="--s1 --advanced" src/styles/themes/main.less public/themes/main.css || {
-  echo "WARNING: Theme building failed. Styles may not load properly."
-}
+node_modules/.bin/lessc --js --clean-css="--s1 --advanced" src/styles/themes/main.less public/themes/main.css
 
-# Prefer CRACO if present; else yarn start; else npm start
 echo "Starting React dev server on port $DEV_PORT..."
-if [ -f "node_modules/.bin/craco" ]; then
-  PORT=$DEV_PORT exec npx craco start
-elif command -v yarn >/dev/null 2>&1; then
-  PORT=$DEV_PORT NODE_ENV=development exec yarn start
-else
-  PORT=$DEV_PORT NODE_ENV=development exec npm run start
-fi
+PORT=$DEV_PORT NODE_ENV=development exec yarn craco start

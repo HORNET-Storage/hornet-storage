@@ -2,6 +2,10 @@
 
 This archive contains the relay, its web panel, Airlock, and the hyperswarm sidecar as one self-contained stack. No component paths or duplicate Airlock identity are required in the default layout.
 
+## Licenses and matching source
+
+The `compliance/` directory is part of the release artifact. It contains every first-party license, the generated third-party license and NOTICE texts for the actual binaries and web bundle, exact source revisions and matching-source links, the exact Node.js runtime license used by the hyperswarm executable, and an asset inventory. Do not redistribute a bundle after removing or modifying that directory.
+
 ## Start
 
 Windows: double-click `start.bat` or run it from Command Prompt.

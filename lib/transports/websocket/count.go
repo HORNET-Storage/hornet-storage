@@ -1,8 +1,6 @@
 package websocket
 
 import (
-	"context"
-
 	jsoniter "github.com/json-iterator/go"
 
 	"github.com/gofiber/contrib/websocket"
@@ -16,9 +14,6 @@ func handleCountMessage(c *websocket.Conn, env *nostr.CountEnvelope, challenge s
 	handler := lib_nostr.GetHandler("count")
 
 	if handler != nil {
-		_, cancelFunc := context.WithCancel(context.Background())
-
-		setListener(env.SubscriptionID, c, env.Filters, cancelFunc)
 
 		response := lib_nostr.BuildResponse("AUTH", challenge)
 		if len(response) > 0 {

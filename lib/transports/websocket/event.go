@@ -74,7 +74,7 @@ func handleEventMessage(c *websocket.Conn, env *nostr.EventEnvelope, _ *connecti
 	}
 }
 
-// handleEventWithHandler processes an event with the given handler
+// handleEventWithHandler processes an event with the given handler.
 func handleEventWithHandler(c *websocket.Conn, env *nostr.EventEnvelope, handler func(lib_nostr.KindReader, lib_nostr.KindWriter)) {
 	var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
@@ -82,22 +82,32 @@ func handleEventWithHandler(c *websocket.Conn, env *nostr.EventEnvelope, handler
 		return json.Marshal(env)
 	}
 
+	accepted := false
 	write := func(messageType string, params ...interface{}) {
+		flat := lib_nostr.ExtractInterfaceValues(params)
+		if messageType == "OK" && len(flat) >= 2 {
+			eventID, _ := flat[0].(string)
+			ok, _ := flat[1].(bool)
+			if eventID == env.Event.ID && ok {
+				accepted = true
+			}
+		}
 		response := lib_nostr.BuildResponse(messageType, params)
 		if len(response) > 0 {
 			handleIncomingMessage(c, response)
 		}
 	}
 
-	// Store the event first, then notify. This ensures subscribers who
-	// re-query after receiving the notification will always find the event.
+	// A live notification must only be emitted after the event handler has
+	// confirmed persistence. This keeps WebSocket and DHT publication semantics
+	// identical and prevents rejected events from leaking into subscriptions.
 	handler(read, write)
+	if !accepted {
+		return
+	}
 
-	// Notify live WebSocket subscribers (async — pushed to a buffered channel
-	// and processed by a dedicated goroutine, so this is non-blocking).
 	notifyListeners(&env.Event)
 
-	// Process event for push notifications
 	if pushService := push.GetGlobalPushService(); pushService != nil {
 		pushService.ProcessEvent(&env.Event)
 	}

@@ -119,15 +119,13 @@ echo(
 echo Starting panel dev server (dev mode)...
 pushd "%PANEL_DIR%" >nul
 
-REM Install deps (Yarn preferred, fallback to npm)
-where yarn >nul 2>nul
-if errorlevel 1 (
-  call npm install
-  if errorlevel 1 echo WARNING: npm install reported issues.
-) else (
-  call yarn install
-  if errorlevel 1 echo WARNING: yarn install reported issues.
-)
+REM Install exactly the repository-pinned dependency graph.
+call corepack enable
+if errorlevel 1 goto FAIL
+call corepack prepare yarn@1.22.19 --activate
+if errorlevel 1 goto FAIL
+call yarn install --frozen-lockfile
+if errorlevel 1 goto FAIL
 
 REM Create themes directory if it doesn't exist and build themes
 echo Building themes for development...
@@ -137,24 +135,11 @@ if errorlevel 1 (
   echo WARNING: Theme building failed. Styles may not load properly.
 )
 
-REM Prefer CRACO if present; else yarn start; else npm start
 echo Starting React dev server on port !DEV_PORT!...
 set "PORT=!DEV_PORT!"
-if exist "node_modules\.bin\craco" (
-  call npx craco start
-  set "RC=%ERRORLEVEL%"
-) else (
-  where yarn >nul 2>nul
-  if errorlevel 1 (
-    set "NODE_ENV=development"
-    call npm run start
-    set "RC=%ERRORLEVEL%"
-  ) else (
-    set "NODE_ENV=development"
-    call yarn start
-    set "RC=%ERRORLEVEL%"
-  )
-)
+set "NODE_ENV=development"
+call yarn craco start
+set "RC=%ERRORLEVEL%"
 
 popd >nul
 popd >nul
