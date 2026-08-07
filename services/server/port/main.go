@@ -4,11 +4,11 @@ import (
 	"context"
 	"flag"
 	"os"
-	"os/signal"
 	"syscall"
 
 	"github.com/HORNET-Storage/hornet-storage/lib/logging"
 	"github.com/HORNET-Storage/hornet-storage/services/server/core"
+	"github.com/HORNET-Storage/hornet-storage/services/server/lifecycle"
 )
 
 var (
@@ -30,15 +30,12 @@ func init() {
 }
 
 func main() {
-	// Convert OS kill signals into the core stop channel
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-
-	stop := make(chan struct{})
-	go func() {
-		<-sigs
-		close(stop)
-	}()
+	stop := lifecycle.StopChannel(
+		os.Stdin,
+		lifecycle.WatchParentStdin(),
+		syscall.SIGINT,
+		syscall.SIGTERM,
+	)
 
 	if err := core.Run(context.Background(), core.Options{
 		CompactDB:      *compactDB,

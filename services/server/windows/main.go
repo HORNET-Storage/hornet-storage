@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/HORNET-Storage/hornet-storage/lib/logging"
 	"github.com/HORNET-Storage/hornet-storage/services/server/core"
+	"github.com/HORNET-Storage/hornet-storage/services/server/lifecycle"
 )
 
 // serviceName is the Windows service identity shared by the installer
@@ -77,15 +77,12 @@ func runConsole() {
 	// Initialize config and logging before entering the shared run lifecycle
 	core.Initialize()
 
-	// Convert OS kill signals into the core stop channel
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-
-	stop := make(chan struct{})
-	go func() {
-		<-sigs
-		close(stop)
-	}()
+	stop := lifecycle.StopChannel(
+		os.Stdin,
+		lifecycle.WatchParentStdin(),
+		syscall.SIGINT,
+		syscall.SIGTERM,
+	)
 
 	if err := core.Run(context.Background(), options(stop)); err != nil {
 		logging.Fatalf("Relay exited with error: %v", err)
