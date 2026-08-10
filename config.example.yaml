@@ -276,6 +276,9 @@ push_notifications:
         project_id: ""
     service:
         batch_size: 100
+        follow_cache_size: 500
+        follow_cache_ttl: 5m
+        follow_gated: false
         queue_size: 1000
         retry_attempts: 3
         retry_delay: 5s

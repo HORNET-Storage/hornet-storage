@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/HORNET-Storage/hornet-storage/lib/config"
 	"github.com/HORNET-Storage/hornet-storage/lib/logging"
@@ -13,23 +14,38 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 )
 
+const (
+	defaultFollowCacheSize = 500
+	defaultFollowCacheTTL  = 5 * time.Minute
+)
+
+// followCacheEntry stores a user's follow set with expiry
+type followCacheEntry struct {
+	follows  map[string]bool // set of pubkeys this user follows; nil = no contact list found
+	cachedAt time.Time
+}
 // PushService manages push notifications
 type PushService struct {
-	store        stores.Store
-	config       *types.PushNotificationConfig
-	queue        chan *NotificationTask
-	workers      []*Worker
-	ctx          context.Context
-	cancel       context.CancelFunc
-	wg           sync.WaitGroup
-	mutex        sync.RWMutex
-	apnsClient   APNSClient
-	fcmClient    FCMClient
-	isRunning    bool
-	nameCache    map[string]string // Cache for author names (pubkey -> name)
-	cacheMutex   sync.RWMutex       // Mutex for cache access
-	processedIDs map[string]bool    // Track processed event IDs to prevent duplicates
-	idMutex      sync.RWMutex       // Mutex for processed IDs
+	store          stores.Store
+	config         *types.PushNotificationConfig
+	queue          chan *NotificationTask
+	workers        []*Worker
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
+	mutex          sync.RWMutex
+	apnsClient     APNSClient
+	fcmClient      FCMClient
+	isRunning      bool
+	nameCache      map[string]string // Cache for author names (pubkey -> name)
+	cacheMutex     sync.RWMutex      // Mutex for cache access
+	processedIDs   map[string]bool   // Track processed event IDs to prevent duplicates
+	idMutex        sync.RWMutex      // Mutex for processed IDs
+	followCache    map[string]*followCacheEntry // recipientPubkey -> follow set
+	followMutex    sync.RWMutex                 // Mutex for follow cache
+	followCacheTTL time.Duration                // TTL for follow cache entries
+	followCacheMax int                          // Max entries in follow cache
+	followGated    bool                         // Whether follow-gating is enabled
 }
 
 // NotificationTask represents a push notification task
@@ -85,14 +101,30 @@ func NewPushService(store stores.Store) (*PushService, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Parse follow cache TTL
+	followTTL := defaultFollowCacheTTL
+	if cfg.PushNotifications.Service.FollowCacheTTL != "" {
+		if parsed, err := time.ParseDuration(cfg.PushNotifications.Service.FollowCacheTTL); err == nil {
+			followTTL = parsed
+		}
+	}
+	followMax := cfg.PushNotifications.Service.FollowCacheSize
+	if followMax <= 0 {
+		followMax = defaultFollowCacheSize
+	}
+
 	service := &PushService{
-		store:        store,
-		config:       &cfg.PushNotifications,
-		queue:        make(chan *NotificationTask, cfg.PushNotifications.Service.QueueSize),
-		ctx:          ctx,
-		cancel:       cancel,
-		nameCache:    make(map[string]string),
-		processedIDs: make(map[string]bool),
+		store:          store,
+		config:         &cfg.PushNotifications,
+		queue:          make(chan *NotificationTask, cfg.PushNotifications.Service.QueueSize),
+		ctx:            ctx,
+		cancel:         cancel,
+		nameCache:      make(map[string]string),
+		processedIDs:   make(map[string]bool),
+		followCache:    make(map[string]*followCacheEntry),
+		followCacheTTL: followTTL,
+		followCacheMax: followMax,
+		followGated:    cfg.PushNotifications.Service.FollowGated,
 	}
 
 	// Initialize APNs client if enabled
@@ -198,6 +230,12 @@ func (ps *PushService) ProcessEvent(event *nostr.Event) {
 	logging.Infof("🔔 Processing event for push notifications - Kind: %d, Event ID: %s, Author: %s",
 		event.Kind, event.ID, event.PubKey)
 
+	// Proactively warm follow cache when kind 3 events arrive
+	// (kind 3 is disabled for push notifications, but we still use it to update the follow cache)
+	if event.Kind == 3 && ps.followGated {
+		ps.warmFollowCacheFromEvent(event)
+	}
+
 	// Check if this event type should trigger notifications
 	if !ps.shouldNotify(event) {
 		logging.Debugf("Event kind %d does not trigger notifications", event.Kind)
@@ -211,6 +249,13 @@ func (ps *PushService) ProcessEvent(event *nostr.Event) {
 	for _, pubkey := range recipients {
 		// Avoid notifying yourself
 		if pubkey == event.PubKey {
+			continue
+		}
+
+		// Follow-gate: skip notification if recipient doesn't follow the author
+		if ps.followGated && !ps.recipientFollowsAuthor(pubkey, event.PubKey, event) {
+			logging.Debugf("⏭️ Skipping notification: %s does not follow author %s",
+				shortenPubkey(pubkey), shortenPubkey(event.PubKey))
 			continue
 		}
 
@@ -692,6 +737,145 @@ func (ps *PushService) formatNotificationMessage(event *nostr.Event, recipient s
 		message.Title, message.Body, recipient)
 
 	return message
+}
+
+// recipientFollowsAuthor checks if the recipient follows the event author.
+// Returns true (allow notification) if:
+//   - The event kind is exempt from follow-gating (kind 1059, test notifications)
+//   - The recipient has no contact list (permissive for new users)
+//   - The recipient's contact list contains the author
+func (ps *PushService) recipientFollowsAuthor(recipientPubkey, authorPubkey string, event *nostr.Event) bool {
+	// Exempt: test notifications (all-zeros pubkey used by test handler)
+	if authorPubkey == "0000000000000000000000000000000000000000000000000000000000000000" {
+		return true
+	}
+	// Exempt: Gift Wrap DMs (kind 1059) — pubkey is ephemeral, no one "follows" it
+	if event.Kind == 1059 {
+		return true
+	}
+
+	// Check cache
+	ps.followMutex.RLock()
+	if entry, ok := ps.followCache[recipientPubkey]; ok {
+		if time.Since(entry.cachedAt) < ps.followCacheTTL {
+			ps.followMutex.RUnlock()
+			if entry.follows == nil {
+				return true // No contact list = permissive
+			}
+			return entry.follows[authorPubkey]
+		}
+	}
+	ps.followMutex.RUnlock()
+
+	// Cache miss — query store for recipient's kind 3 event
+	follows := ps.loadFollowSet(recipientPubkey)
+
+	// Store in cache
+	ps.followMutex.Lock()
+	ps.followCache[recipientPubkey] = &followCacheEntry{
+		follows:  follows,
+		cachedAt: time.Now(),
+	}
+	if len(ps.followCache) > ps.followCacheMax {
+		ps.evictOldestFollowEntries()
+	}
+	ps.followMutex.Unlock()
+
+	if follows == nil {
+		return true // No contact list = permissive (don't block new users)
+	}
+	return follows[authorPubkey]
+}
+
+// loadFollowSet queries the store for a user's kind 3 contact list and
+// returns a set of followed pubkeys. Returns nil if no contact list exists.
+func (ps *PushService) loadFollowSet(pubkey string) map[string]bool {
+	filter := nostr.Filter{
+		Authors: []string{pubkey},
+		Kinds:   []int{3},
+		Limit:   1,
+	}
+	events, err := ps.store.QueryEvents(filter)
+	if err != nil || len(events) == 0 {
+		return nil // nil = no contact list found
+	}
+
+	follows := make(map[string]bool)
+	for _, tag := range events[0].Tags {
+		if len(tag) >= 2 && tag[0] == "p" {
+			follows[tag[1]] = true
+		}
+	}
+	return follows
+}
+
+// warmFollowCacheFromEvent updates the follow cache directly from a kind 3 event.
+// Called when ProcessEvent receives a kind 3 event (before shouldNotify filters it out).
+// Checks the store first to avoid overwriting the cache with a stale contact list.
+func (ps *PushService) warmFollowCacheFromEvent(event *nostr.Event) {
+	// Don't warm cache with stale data — check if store already has a newer kind 3
+	existingFilter := nostr.Filter{
+		Authors: []string{event.PubKey},
+		Kinds:   []int{3},
+		Limit:   1,
+	}
+	if existing, err := ps.store.QueryEvents(existingFilter); err == nil && len(existing) > 0 {
+		if existing[0].CreatedAt > event.CreatedAt {
+			logging.Debugf("🔄 Skipping cache warm for %s — store has newer kind 3", shortenPubkey(event.PubKey))
+			return
+		}
+	}
+
+	follows := make(map[string]bool)
+	for _, tag := range event.Tags {
+		if len(tag) >= 2 && tag[0] == "p" {
+			follows[tag[1]] = true
+		}
+	}
+
+	ps.followMutex.Lock()
+	ps.followCache[event.PubKey] = &followCacheEntry{
+		follows:  follows,
+		cachedAt: time.Now(),
+	}
+	ps.followMutex.Unlock()
+
+	logging.Debugf("🔄 Warmed follow cache for %s (%d follows)", shortenPubkey(event.PubKey), len(follows))
+}
+
+// evictOldestFollowEntries removes the oldest 10% of follow cache entries.
+// Must be called with followMutex held for writing.
+func (ps *PushService) evictOldestFollowEntries() {
+	type keyAge struct {
+		key      string
+		cachedAt time.Time
+	}
+
+	itemsToRemove := ps.followCacheMax / 10
+	if itemsToRemove < 1 {
+		itemsToRemove = 1
+	}
+
+	items := make([]keyAge, 0, len(ps.followCache))
+	for k, v := range ps.followCache {
+		items = append(items, keyAge{k, v.cachedAt})
+	}
+
+	// Selection sort to find oldest N items to remove
+	for i := 0; i < itemsToRemove && i < len(items); i++ {
+		oldest := i
+		for j := i + 1; j < len(items); j++ {
+			if items[j].cachedAt.Before(items[oldest].cachedAt) {
+				oldest = j
+			}
+		}
+		if oldest != i {
+			items[i], items[oldest] = items[oldest], items[i]
+		}
+		delete(ps.followCache, items[i].key)
+	}
+
+	logging.Debugf("🧹 Evicted %d oldest follow cache entries", itemsToRemove)
 }
 
 // Global service instance

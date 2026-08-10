@@ -1182,6 +1182,9 @@ func setDefaults() {
 	viper.SetDefault("push_notifications.service.batch_size", 100)
 	viper.SetDefault("push_notifications.service.retry_attempts", 3)
 	viper.SetDefault("push_notifications.service.retry_delay", "5s")
+	viper.SetDefault("push_notifications.service.follow_gated", false)
+	viper.SetDefault("push_notifications.service.follow_cache_size", 500)
+	viper.SetDefault("push_notifications.service.follow_cache_ttl", "5m")
 }
 
 // GetAllSettingsAsMap returns all configuration settings as a map
@@ -1323,6 +1326,9 @@ func GetAllSettingsAsMap() (map[string]interface{}, error) {
 			"batch_size":     cfg.PushNotifications.Service.BatchSize,
 			"retry_attempts": cfg.PushNotifications.Service.RetryAttempts,
 			"retry_delay":    cfg.PushNotifications.Service.RetryDelay,
+			"follow_gated":      cfg.PushNotifications.Service.FollowGated,
+			"follow_cache_size": cfg.PushNotifications.Service.FollowCacheSize,
+			"follow_cache_ttl":  cfg.PushNotifications.Service.FollowCacheTTL,
 		},
 	}
 

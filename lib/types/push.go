@@ -61,4 +61,7 @@ type PushServiceConfig struct {
 	BatchSize     int    `mapstructure:"batch_size"`
 	RetryAttempts int    `mapstructure:"retry_attempts"`
 	RetryDelay    string `mapstructure:"retry_delay"`
+	FollowGated     bool   `mapstructure:"follow_gated"`
+	FollowCacheSize int    `mapstructure:"follow_cache_size"`
+	FollowCacheTTL  string `mapstructure:"follow_cache_ttl"`
 }

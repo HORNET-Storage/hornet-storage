@@ -134,9 +134,14 @@ func BuildKind0Handler(store stores.Store, relayPrivKey *btcec.PrivateKey) func(
 			return
 		}
 
-		// Delete existing kind 0 events if any
+		// Delete existing kind 0 events if any (NIP-01 replaceable event semantics)
 		if len(existingEvents) > 0 {
 			for _, oldEvent := range existingEvents {
+				if oldEvent.CreatedAt > env.Event.CreatedAt {
+					// Existing event is newer — reject the incoming event
+					write("OK", env.Event.ID, false, "blocked: existing profile is newer")
+					return
+				}
 				if err := store.DeleteEvent(oldEvent.ID); err != nil {
 					logging.Infof("Error deleting old kind 0 event %s: %v", oldEvent.ID, err)
 					write("NOTICE", "Error deleting old kind 0 event %s: %v", oldEvent.ID, err)

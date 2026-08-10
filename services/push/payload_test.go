@@ -60,10 +60,15 @@ func (m *mockPushStore) GetStatsStore() statistics.StatisticsStore {
 }
 
 // newTestPushService creates a PushService with a mock store for testing
+// newTestPushService creates a PushService with a mock store for testing
 func newTestPushService(events []*nostr.Event) *PushService {
 	return &PushService{
-		store:     &mockPushStore{events: events},
-		nameCache: make(map[string]string),
+		store:          &mockPushStore{events: events},
+		nameCache:      make(map[string]string),
+		followCache:    make(map[string]*followCacheEntry),
+		followCacheTTL: 5 * time.Minute,
+		followCacheMax: 500,
+		followGated:    false, // disabled by default in tests
 	}
 }
 
@@ -421,4 +426,69 @@ func logPayload(t *testing.T, label string, message *PushMessage) {
 	payload := message.ToAPNsPayload()
 	payloadJSON, _ := json.MarshalIndent(payload, "", "  ")
 	t.Logf("\n📱 %s APNs Payload:\n%s", label, string(payloadJSON))
+}
+
+// TestFollowGate_BlocksNonFollower verifies that notifications are blocked
+// when the recipient does not follow the event author.
+func TestFollowGate_BlocksNonFollower(t *testing.T) {
+	// Recipient's contact list (kind 3) — follows only "friend_pubkey"
+	contactList := &nostr.Event{
+		ID:        "contact_list_123",
+		PubKey:    "recipient_pubkey",
+		Kind:      3,
+		Tags:      nostr.Tags{{"p", "friend_pubkey"}},
+		CreatedAt: nostr.Timestamp(time.Now().Unix()),
+	}
+
+	ps := newTestPushService([]*nostr.Event{contactList})
+	ps.followGated = true
+
+	// Event from someone the recipient follows — should be allowed
+	friendEvent := &nostr.Event{Kind: 1, PubKey: "friend_pubkey"}
+	if !ps.recipientFollowsAuthor("recipient_pubkey", "friend_pubkey", friendEvent) {
+		t.Error("Expected notification to be allowed for followed author")
+	}
+
+	// Event from someone the recipient does NOT follow — should be blocked
+	strangerEvent := &nostr.Event{Kind: 1, PubKey: "stranger_pubkey"}
+	if ps.recipientFollowsAuthor("recipient_pubkey", "stranger_pubkey", strangerEvent) {
+		t.Error("Expected notification to be blocked for non-followed author")
+	}
+}
+
+// TestFollowGate_AllowsKind1059 verifies that encrypted DMs (Gift Wrap)
+// bypass the follow gate since the pubkey is ephemeral.
+func TestFollowGate_AllowsKind1059(t *testing.T) {
+	ps := newTestPushService(nil)
+	ps.followGated = true
+
+	giftWrap := &nostr.Event{Kind: 1059, PubKey: "ephemeral_key"}
+	if !ps.recipientFollowsAuthor("recipient_pubkey", "ephemeral_key", giftWrap) {
+		t.Error("Expected kind 1059 to bypass follow gate")
+	}
+}
+
+// TestFollowGate_AllowsTestNotification verifies that test notifications
+// (all-zeros pubkey) bypass the follow gate.
+func TestFollowGate_AllowsTestNotification(t *testing.T) {
+	ps := newTestPushService(nil)
+	ps.followGated = true
+
+	testEvent := &nostr.Event{Kind: 1808, PubKey: "0000000000000000000000000000000000000000000000000000000000000000"}
+	if !ps.recipientFollowsAuthor("recipient_pubkey", testEvent.PubKey, testEvent) {
+		t.Error("Expected test notification to bypass follow gate")
+	}
+}
+
+// TestFollowGate_AllowsNoContactList verifies that users with no contact list
+// still receive all notifications (permissive for new users).
+func TestFollowGate_AllowsNoContactList(t *testing.T) {
+	// No events in store — recipient has no kind 3
+	ps := newTestPushService(nil)
+	ps.followGated = true
+
+	event := &nostr.Event{Kind: 1, PubKey: "some_author"}
+	if !ps.recipientFollowsAuthor("recipient_pubkey", "some_author", event) {
+		t.Error("Expected notification to be allowed when recipient has no contact list")
+	}
 }

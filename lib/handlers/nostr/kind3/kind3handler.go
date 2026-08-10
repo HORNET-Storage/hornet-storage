@@ -47,12 +47,16 @@ func BuildKind3Handler(store stores.Store) func(read lib_nostr.KindReader, write
 			return
 		}
 
-		// If there's an existing event, delete it
+		// If there are existing events, check timestamps (NIP-01 replaceable event semantics)
 		if len(existingEvents) > 0 {
 			for _, oldEvent := range existingEvents {
+				if oldEvent.CreatedAt > env.Event.CreatedAt {
+					// Existing event is newer — reject the incoming event
+					write("OK", env.Event.ID, false, "blocked: existing contact list is newer")
+					return
+				}
 				if err := store.DeleteEvent(oldEvent.ID); err != nil {
 					logging.Infof("Error deleting old contact list event %s: %v", oldEvent.ID, err)
-					// Decide how to handle delete failures
 				}
 			}
 		}
